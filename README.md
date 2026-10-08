@@ -235,6 +235,17 @@ You can animate layers with:
 - `src/scripts/mcp-bridge-auto.jsx`: Main After Effects panel script
 - `install-bridge.js`: Script to install the panel in After Effects
 
+### 🔌 Bridge protocol
+
+The server and the **MCP Bridge Auto** panel talk through `~/Documents/ae-mcp-bridge/`:
+
+- `queue/<timestamp>-<id>.json`: one file per command, `{id, command, args}`. The panel runs them oldest-first and deletes each file when done. Commands waiting more than 10 minutes expire with an error result.
+- `results/<id>.json`: the result for that command (the newest 100 are kept). Results carry `_commandId`, `_commandExecuted` and `_project`.
+- `ae_mcp_result.json`: still written with the latest result, for older clients.
+- `ae_command.json`: the old single-file command path still works, but clients that use it can overwrite each other.
+
+Each server instance only reads results for its own command ids, so several clients (for example two Claude sessions) can share one After Effects safely. `id` may only contain letters, digits, `_` and `-`.
+
 ### 📦 Building the Project
 
 ```bash

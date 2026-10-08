@@ -1777,6 +1777,92 @@ function getResultFilePath() {
     return bridgeFolder.fsName + "/ae_mcp_result.json";
 }
 
+// --- Command queue ---
+// Each client writes one file per command to queue/ and reads its own result from results/<id>.json, so several
+// clients can share the bridge without overwriting each other. The old single ae_command.json /
+// ae_mcp_result.json pair still works for clients that have not moved over.
+function getBridgeSubfolder(name) {
+    var folder = new Folder(Folder.myDocuments.fsName + "/ae-mcp-bridge/" + name);
+    if (!folder.exists) { folder.create(); }
+    return folder;
+}
+function getQueueFolder() { return getBridgeSubfolder("queue"); }
+function getResultsFolder() { return getBridgeSubfolder("results"); }
+
+function writeTextFile(path, text) {
+    var f = new File(path);
+    f.encoding = "UTF-8";
+    if (!f.open("w")) { throw new Error("Failed to open for writing: " + f.fsName); }
+    f.write(text);
+    f.close();
+}
+
+// Keep only the newest 100 per-command results
+function pruneResults() {
+    try {
+        var files = getResultsFolder().getFiles("*.json");
+        if (!files || files.length <= 100) { return; }
+        files.sort(function (a, b) { return a.modified.getTime() - b.modified.getTime(); });
+        for (var i = 0; i < files.length - 100; i++) { try { files[i].remove(); } catch (e1) {} }
+    } catch (e) {}
+}
+
+// Write a command's result: results/<id>.json (written under a temp name then renamed, so a polling client never
+// reads half a file) and, for compatibility, ae_mcp_result.json as "the latest result".
+function writeResultFiles(resultString, id) {
+    if (id) {
+        var dir = getResultsFolder().fsName;
+        var tmp = dir + "/" + id + ".json.tmp";
+        writeTextFile(tmp, resultString);
+        var tmpFile = new File(tmp);
+        if (!tmpFile.rename(id + ".json")) {
+            writeTextFile(dir + "/" + id + ".json", resultString);
+            try { tmpFile.remove(); } catch (e) {}
+        }
+        pruneResults();
+    }
+    writeTextFile(getResultFilePath(), resultString);
+}
+
+// Run queued commands oldest-first (up to 10 per tick). Returns how many ran.
+function processQueue() {
+    var files = getQueueFolder().getFiles("*.json");
+    if (!files || files.length === 0) { return 0; }
+    files.sort(function (a, b) { return a.name < b.name ? -1 : (a.name > b.name ? 1 : 0); });
+    var handled = 0;
+    for (var i = 0; i < files.length && handled < 10; i++) {
+        var qf = files[i];
+        var data = null;
+        try {
+            qf.encoding = "UTF-8";
+            qf.open("r");
+            var content = qf.read();
+            qf.close();
+            data = JSON.parse(content);
+        } catch (parseErr) {
+            logToPanel("Discarding unreadable queue file " + qf.name + ": " + parseErr.toString());
+            try { qf.remove(); } catch (e0) {}
+            continue;
+        }
+        var id = data ? String(data.id || "") : "";
+        // The id becomes a file name, so only allow plain characters
+        if (!/^[A-Za-z0-9_\-]{1,80}$/.test(id) || !data.command) {
+            logToPanel("Discarding queue file with a missing or invalid id/command: " + qf.name);
+            try { qf.remove(); } catch (e1) {}
+            continue;
+        }
+        if (new Date().getTime() - qf.modified.getTime() > 10 * 60 * 1000) {
+            writeResultFiles(JSON.stringify({ status: "error", message: "Command expired in the queue: it waited more than 10 minutes for After Effects to process it", _commandId: id, _commandExecuted: data.command }), id);
+            try { qf.remove(); } catch (e2) {}
+            continue;
+        }
+        try { executeCommand(data.command, data.args || {}, id); }
+        finally { try { qf.remove(); } catch (e3) {} }
+        handled++;
+    }
+    return handled;
+}
+
 // --- setCompositionProperties: set duration, frameRate, etc. on active or named comp ---
 function setCompositionProperties(args) {
     try {
@@ -2277,7 +2363,7 @@ function isoTimestamp(d) {
 }
 
 // Execute command
-function executeCommand(command, args) {
+function executeCommand(command, args, id) {
     var result = "";
 
     logToPanel("Executing command: " + command);
@@ -2483,6 +2569,7 @@ function executeCommand(command, args) {
             var resultObj = JSON.parse(resultString);
             // Add a timestamp to help identify if we're getting fresh results
             resultObj._commandExecuted = command;
+            if (id) { resultObj._commandId = id; }
             try { resultObj._project = projectStatus(); } catch (ctxError) {}
             resultObj._responseTimestamp = isoTimestamp(new Date());
             resultString = JSON.stringify(resultObj, null, 2);
@@ -2493,26 +2580,7 @@ function executeCommand(command, args) {
             // We'll still continue with the original string
         }
         
-        var resultFile = new File(getResultFilePath());
-        resultFile.encoding = "UTF-8"; // Ensure UTF-8 encoding
-        logToPanel("Opening result file for writing...");
-        var opened = resultFile.open("w");
-        if (!opened) {
-            logToPanel("ERROR: Failed to open result file for writing: " + resultFile.fsName);
-            throw new Error("Failed to open result file for writing.");
-        }
-        logToPanel("Writing to result file...");
-        var written = resultFile.write(resultString);
-        if (!written) {
-             logToPanel("ERROR: Failed to write to result file (write returned false): " + resultFile.fsName);
-             // Still try to close, but log the error
-        }
-        logToPanel("Closing result file...");
-        var closed = resultFile.close();
-         if (!closed) {
-             logToPanel("ERROR: Failed to close result file: " + resultFile.fsName);
-             // Continue, but log the error
-        }
+        writeResultFiles(resultString, id);
         logToPanel("Result file write process complete.");
         
         logToPanel("Command completed successfully: " + command); // Changed log message
@@ -2520,7 +2588,7 @@ function executeCommand(command, args) {
         
         // Update command file status
         logToPanel("Updating command status to completed...");
-        updateCommandStatus("completed");
+        if (!id) { updateCommandStatus("completed"); }
         logToPanel("Command status updated.");
         
     } catch (error) {
@@ -2536,24 +2604,19 @@ function executeCommand(command, args) {
                 command: command,
                 message: error.toString(),
                 line: error.line,
-                fileName: error.fileName
+                fileName: error.fileName,
+                _commandId: id || null,
+                _commandExecuted: command
             });
-            var errorFile = new File(getResultFilePath());
-            errorFile.encoding = "UTF-8";
-            if (errorFile.open("w")) {
-                errorFile.write(errorResult);
-                errorFile.close();
-                logToPanel("Successfully wrote ERROR to result file.");
-            } else {
-                 logToPanel("CRITICAL ERROR: Failed to open result file to write error!");
-            }
+            writeResultFiles(errorResult, id);
+            logToPanel("Successfully wrote ERROR to result file.");
         } catch (writeError) {
              logToPanel("CRITICAL ERROR: Failed to write error to result file: " + writeError.toString());
         }
         
         // Update command file status even after error
         logToPanel("Updating command status to error...");
-        updateCommandStatus("error");
+        if (!id) { updateCommandStatus("error"); }
         logToPanel("Command status updated to error.");
     }
 }
@@ -2594,6 +2657,9 @@ function checkForCommands() {
     isChecking = true;
     
     try {
+        processQueue();
+
+        // Legacy single-file protocol
         var commandFile = new File(getCommandFilePath());
         if (commandFile.exists) {
             commandFile.open("r");

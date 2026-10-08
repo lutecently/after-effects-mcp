@@ -54,109 +54,69 @@ function annotateProjectChange(content: string): string {
   }
 }
 
-// Helper function to read results from After Effects temp file
-function readResultsFromTempFile(): string {
-  try {
-    const tempFilePath = path.join(getAETempDir(), 'ae_mcp_result.json');
-    
-    // Add debugging info
-    console.error(`Checking for results at: ${tempFilePath}`);
-    
-    if (fs.existsSync(tempFilePath)) {
-      // Get file stats to check modification time
-      const stats = fs.statSync(tempFilePath);
-      console.error(`Result file exists, last modified: ${stats.mtime.toISOString()}`);
-      
-      const content = fs.readFileSync(tempFilePath, 'utf8');
-      console.error(`Result file content length: ${content.length} bytes`);
-      
-      // If the result file is older than 30 seconds, warn the user
-      const thirtySecondsAgo = new Date(Date.now() - 30 * 1000);
-      if (stats.mtime < thirtySecondsAgo) {
-        console.error(`WARNING: Result file is older than 30 seconds. After Effects may not be updating results.`);
-        return JSON.stringify({ 
-          warning: "Result file appears to be stale (not recently updated).",
-          message: "This could indicate After Effects is not properly writing results or the MCP Bridge Auto panel isn't running.",
-          lastModified: stats.mtime.toISOString(),
-          originalContent: content
-        });
-      }
-      
-      return annotateProjectChange(content);
-    } else {
-      console.error(`Result file not found at: ${tempFilePath}`);
-      return JSON.stringify({ error: "No results file found. Please run a script in After Effects first." });
-    }
-  } catch (error) {
-    console.error("Error reading results file:", error);
-    return JSON.stringify({ error: `Failed to read results: ${String(error)}` });
+// --- Command queue ---
+// Every command is written as its own file in queue/ with a unique id; After Effects runs them oldest-first and writes
+// results/<id>.json. Each server instance only reads results for its own commands, so several clients can share one
+// bridge folder without overwriting each other's commands or reading each other's results.
+function getBridgeSubdir(name: string): string {
+  const dir = path.join(getAETempDir(), name);
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
   }
+  return dir;
 }
 
-// Helper to wait for a fresh result produced by a specific command
-async function waitForBridgeResult(expectedCommand?: string, timeoutMs: number = 5000, pollMs: number = 250): Promise<string> {
-  const start = Date.now();
-  const resultPath = path.join(getAETempDir(), 'ae_mcp_result.json');
-  let lastSize = -1;
+let lastCommandId: string | null = null;
+let lastQueueFile: string | null = null;
+let commandCounter = 0;
 
-  while (Date.now() - start < timeoutMs) {
+// Queue a command for After Effects and return its id
+function writeCommandFile(command: string, args: Record<string, any> = {}): string {
+  const id = `${process.pid}-${Date.now().toString(36)}-${++commandCounter}`;
+  const queueFile = path.join(getBridgeSubdir('queue'), `${String(Date.now()).padStart(13, '0')}-${id}.json`);
+  const tmpFile = `${queueFile}.tmp`;
+  // Write under a temp name, then rename, so the panel never picks up half a file
+  fs.writeFileSync(tmpFile, JSON.stringify({ id, command, args, timestamp: new Date().toISOString() }, null, 2));
+  fs.renameSync(tmpFile, queueFile);
+  lastCommandId = id;
+  lastQueueFile = queueFile;
+  console.error(`Command "${command}" queued as ${id}`);
+  return id;
+}
+
+// Wait for the result of one specific command. Returns null on timeout.
+async function waitForResult(id: string, timeoutMs: number, pollMs: number = 250): Promise<string | null> {
+  const resultPath = path.join(getBridgeSubdir('results'), `${id}.json`);
+  const start = Date.now();
+  for (;;) {
     if (fs.existsSync(resultPath)) {
       try {
         const content = fs.readFileSync(resultPath, 'utf8');
-        if (content && content.length > 0 && content.length !== lastSize) {
-          lastSize = content.length;
-          try {
-            const parsed = JSON.parse(content);
-            if (!expectedCommand || parsed._commandExecuted === expectedCommand) {
-              return annotateProjectChange(content);
-            }
-          } catch {
-            // not JSON yet; continue polling
-          }
-        }
+        if (content) return annotateProjectChange(content);
       } catch {
-        // transient read error; continue polling
+        // transient read error; try again
       }
     }
+    if (Date.now() - start >= timeoutMs) return null;
     await new Promise(r => setTimeout(r, pollMs));
   }
-  return JSON.stringify({ error: `Timed out waiting for bridge result${expectedCommand ? ` for command '${expectedCommand}'` : ''}.` });
 }
 
-// Helper function to write command to file
-function writeCommandFile(command: string, args: Record<string, any> = {}): void {
-  try {
-    const commandFile = path.join(getAETempDir(), 'ae_command.json');
-    const commandData = {
-      command,
-      args,
-      timestamp: new Date().toISOString(),
-      status: "pending"  // pending, running, completed, error
-    };
-    fs.writeFileSync(commandFile, JSON.stringify(commandData, null, 2));
-    console.error(`Command "${command}" written to ${commandFile}`);
-  } catch (error) {
-    console.error("Error writing command file:", error);
+// Result of the last command this server queued
+async function readLastResult(timeoutMs: number = 8000): Promise<string> {
+  if (!lastCommandId) {
+    return JSON.stringify({ error: "No command has been queued by this server session yet. Run a script first." });
   }
-}
-
-// Helper function to clear the results file to avoid stale cache
-function clearResultsFile(): void {
-  try {
-    const resultFile = path.join(getAETempDir(), 'ae_mcp_result.json');
-    
-    // Write a placeholder message to indicate the file is being reset
-    const resetData = {
-      status: "waiting",
-      message: "Waiting for new result from After Effects...",
-      timestamp: new Date().toISOString()
-    };
-    
-    fs.writeFileSync(resultFile, JSON.stringify(resetData, null, 2));
-    console.error(`Results file cleared at ${resultFile}`);
-  } catch (error) {
-    console.error("Error clearing results file:", error);
-  }
+  const found = await waitForResult(lastCommandId, timeoutMs);
+  if (found) return found;
+  const stillQueued = lastQueueFile !== null && fs.existsSync(lastQueueFile);
+  return JSON.stringify({
+    status: "waiting",
+    commandId: lastCommandId,
+    message: stillQueued
+      ? "The command is queued or still running. If it stays queued, open the MCP Bridge Auto panel in After Effects. A render blocks After Effects until it finishes."
+      : "The command left the queue but no result was found. After Effects may have been closed or the panel reloaded; check its state and resend."
+  });
 }
 
 // Add a resource to expose project compositions
@@ -164,10 +124,9 @@ server.resource(
   "compositions",
   "aftereffects://compositions",
   async (uri) => {
-    // Clear old results, queue the command, and wait for bridge output
-    clearResultsFile();
-    writeCommandFile("listCompositions", {});
-    const result = await waitForBridgeResult("listCompositions", 6000, 250);
+    // Queue the command and wait for its result
+    const id = writeCommandFile("listCompositions", {});
+    const result = (await waitForResult(id, 6000)) ?? JSON.stringify({ error: "Timed out waiting for the bridge result for listCompositions." });
 
     return {
       contents: [{
@@ -245,10 +204,7 @@ server.tool(
     }
 
     try {
-      // Clear any stale result data
-      clearResultsFile();
-      
-      // Write command to file for After Effects to pick up
+      // Queue the command for After Effects to pick up
       writeCommandFile(script, parameters);
       
       return {
@@ -278,11 +234,11 @@ server.tool(
 // Add a tool to get the results from the last script execution
 server.tool(
   "get-results",
-  "Get results from the last script executed in After Effects",
+  "Get the result of the last command this server queued in After Effects (waits up to ~8s for it). Results are matched by command id, so other clients sharing the bridge cannot overwrite or be mistaken for yours.",
   {},
   async () => {
     try {
-      const result = readResultsFromTempFile();
+      const result = await readLastResult();
       return {
         content: [
           {
@@ -813,7 +769,7 @@ server.tool(
       await new Promise(resolve => setTimeout(resolve, 1000));
       
       // Get the results
-      const result = readResultsFromTempFile();
+      const result = await readLastResult();
       
       return {
         content: [
@@ -865,7 +821,7 @@ server.tool(
       await new Promise(resolve => setTimeout(resolve, 1000));
       
       // Get the results
-      const result = readResultsFromTempFile();
+      const result = await readLastResult();
       
       return {
         content: [
@@ -981,10 +937,7 @@ server.tool(
   {},
   async () => {
     try {
-      // Clear any stale result data
-      clearResultsFile();
-      
-      // Write command to file for After Effects to pick up
+      // Queue the command for After Effects to pick up
       writeCommandFile("bridgeTestEffects", {});
       
       return {
