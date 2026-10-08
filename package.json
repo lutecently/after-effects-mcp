@@ -3,13 +3,26 @@
   "version": "1.0.0",
   "description": "MCP server for Adobe After Effects",
   "main": "build/index.js",
+  "bin": {
+    "after-effects-mcp": "build/cli.js"
+  },
+  "files": [
+    "build",
+    "install-bridge.js",
+    "README.md",
+    "LICENSE"
+  ],
   "type": "module",
+  "engines": {
+    "node": ">=18"
+  },
   "scripts": {
-    "build": "esbuild src/index.ts --bundle --platform=node --format=esm --outfile=build/index.js --packages=external && copyfiles -u 1 \"src/scripts/**/*\" build",
+    "build": "esbuild src/index.ts --bundle --platform=node --format=esm --outfile=build/index.js --packages=external && esbuild src/cli.ts --bundle --platform=node --format=esm --outfile=build/cli.js --packages=external --loader:.html=text --banner:js=\"#!/usr/bin/env node\" && copyfiles -u 1 \"src/scripts/**/*\" build",
     "start": "node build/index.js",
+    "setup": "node build/cli.js setup",
     "install-bridge": "node install-bridge.js",
     "test:bridge": "node test/bridge-test.mjs",
-    "postinstall": "npm run build"
+    "prepack": "npm run build"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.28.0",

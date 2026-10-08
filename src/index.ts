@@ -20,12 +20,25 @@ const __dirname = path.dirname(__filename);
 // Define paths
 const SCRIPTS_DIR = path.join(__dirname, "scripts");
 const TEMP_DIR = path.join(__dirname, "temp");
+const DEFAULT_BRIDGE_DIR = path.join(os.homedir(), "Documents", "ae-mcp-bridge");
+
+function readRuntimeSettings(): Record<string, unknown> {
+  try {
+    return JSON.parse(fs.readFileSync(path.join(DEFAULT_BRIDGE_DIR, "settings.json"), "utf8"));
+  } catch {
+    return {};
+  }
+}
+
+function numericSetting(name: string, fallback: number, min: number, max: number): number {
+  const value = Number(readRuntimeSettings()[name]);
+  return Number.isFinite(value) ? Math.max(min, Math.min(max, value)) : fallback;
+}
 
 // Get the correct directory for AE bridge files
 // Use ~/Documents/ae-mcp-bridge for reliable cross-process access
 function getAETempDir(): string {
-  const homeDir = os.homedir();
-  const bridgeDir = path.join(homeDir, 'Documents', 'ae-mcp-bridge');
+  const bridgeDir = DEFAULT_BRIDGE_DIR;
   // Ensure the directory exists
   if (!fs.existsSync(bridgeDir)) {
     fs.mkdirSync(bridgeDir, { recursive: true });
@@ -107,6 +120,32 @@ function getBridgeSubdir(name: string): string {
   return dir;
 }
 
+function readJsonFile(filePath: string): unknown {
+  try { return JSON.parse(fs.readFileSync(filePath, "utf8")); }
+  catch { return null; }
+}
+
+function getDashboardStatus(): Record<string, unknown> {
+  const queueDir = getBridgeSubdir("queue");
+  const resultsDir = getBridgeSubdir("results");
+  const listJson = (dir: string) => {
+    try { return fs.readdirSync(dir).filter((name) => name.endsWith(".json")); }
+    catch { return []; }
+  };
+  const heartbeat = readJsonFile(path.join(getAETempDir(), "status.json"));
+  const timestamp = heartbeat && typeof heartbeat === "object" && "timestamp" in heartbeat
+    ? Date.parse(String((heartbeat as Record<string, unknown>).timestamp))
+    : NaN;
+  return {
+    connected: Number.isFinite(timestamp) && Date.now() - timestamp < 10_000,
+    heartbeat,
+    settings: readRuntimeSettings(),
+    queueDepth: listJson(queueDir).length,
+    retainedResults: listJson(resultsDir).length,
+    bridgeDirectory: getAETempDir(),
+  };
+}
+
 let lastCommandId: string | null = null;
 let lastQueueFile: string | null = null;
 let commandCounter = 0;
@@ -139,12 +178,12 @@ async function waitForResult(id: string, timeoutMs: number, pollMs: number = 250
       }
     }
     if (Date.now() - start >= timeoutMs) return null;
-    await new Promise(r => setTimeout(r, pollMs));
+    await new Promise(r => setTimeout(r, numericSetting("resultPollIntervalMs", pollMs, 50, 5000)));
   }
 }
 
 // Result of the last command this server queued
-async function readLastResult(timeoutMs: number = 8000): Promise<string> {
+async function readLastResult(timeoutMs: number = numericSetting("responseTimeoutMs", 8000, 1000, 120000)): Promise<string> {
   if (!lastCommandId) {
     return JSON.stringify({ error: "No command has been queued by this server session yet. Run a script first." });
   }
@@ -167,7 +206,7 @@ server.resource(
   async (uri) => {
     // Queue the command and wait for its result
     const id = writeCommandFile("listCompositions", {});
-    const result = (await waitForResult(id, 6000)) ?? JSON.stringify({ error: "Timed out waiting for the bridge result for listCompositions." });
+    const result = (await waitForResult(id, numericSetting("responseTimeoutMs", 8000, 1000, 120000))) ?? JSON.stringify({ error: "Timed out waiting for the bridge result for listCompositions." });
 
     return {
       contents: [{
@@ -177,6 +216,27 @@ server.resource(
       }]
     };
   }
+);
+
+server.resource(
+  "dashboard-status",
+  "aftereffects://dashboard/status",
+  async (uri) => ({
+    contents: [{
+      uri: uri.href,
+      mimeType: "application/json",
+      text: JSON.stringify(getDashboardStatus(), null, 2),
+    }],
+  })
+);
+
+server.tool(
+  "get-dashboard-status",
+  "Inspect the same connection health, heartbeat, queue counts, and safety settings shown in the local setup dashboard. This is read-only and does not run an After Effects command.",
+  {},
+  async () => ({
+    content: [{ type: "text", text: JSON.stringify(getDashboardStatus(), null, 2) }],
+  })
 );
 
 // Add a tool for running read-only scripts
@@ -409,6 +469,13 @@ Layer/comp management scripts (run via run-script; comps are found by compName, 
 - listEffects: {query?, category?, limit?}. Finds effect display names and match names, so applyEffect does not need guessing
 - listFonts: {query?, limit?}. Finds PostScript font names for setTextDocument (After Effects 24 or later)
 - listRenderTemplates: {}. Render settings and output module templates, for addToRenderQueue
+- addExpressionControl: {compName?, layerIndex|layerName, type (slider|checkbox|color|angle|point|point3d|layer|dropdown), name, value?, options? (dropdown items)}. Adds an Expression Control effect and returns the expression text that reads it
+- getPropertyReference: {compName?, layerIndex|layerName, propertyPath | propertyName (+effectName?)}. The expression text that reads a property, e.g. thisComp.layer("Controller").effect("Speed")("Slider")
+- linkProperty: {from: {compName?, layerIndex|layerName, propertyPath|propertyName, effectName?}, to: {same}, factor?, offset?}. Makes "to" follow "from" with an expression (like the pick whip); factor and offset (single-number properties) give from * factor + offset. Same comp only
+- setCameraProperties: {compName?, layerIndex|layerName (a camera), cameraType? (one-node|two-node), zoom?, depthOfField?, focusDistance?, aperture?, blurLevel?, position?, pointOfInterest?}. createCamera makes the camera
+- createLight: {compName?, name?, lightType? (point|spot|parallel|ambient), intensity?, color? [r,g,b], coneAngle?, coneFeather?, castsShadows?, shadowDarkness?, shadowDiffusion?, position?, pointOfInterest?}
+- setLightProperties: {compName?, layerIndex|layerName (a light)} plus any of the createLight settings
+- backupProject: {folder? (default ~/Documents/ae-mcp-bridge/backups), label?, saveFirst?}. Copies the project file to a timestamped file. That is the last saved state; saveFirst saves the open project in place first
 - deleteProjectItems: {namePrefix (min 4 chars), dryRun?, includeFolders?}. Removes comps/footage/solids whose names start with the prefix (and every layer using them). Folders are kept unless includeFolders is true (then only emptied ones go). For cleaning up scratch items
 - exportFrame: {compName? (default: active comp), time? (seconds, default: comp time), outputPath? (.png; default: ~/Documents/ae-mcp-bridge/frames/), overwrite?, scale? (1 full size, 2 half, 4 quarter)}. Saves one frame as a PNG and returns its path, so you can open the image and check the result
 - getRenderStatus: {}. Render queue items, status and output paths

@@ -62,7 +62,7 @@
 
 ### 🛠 Prerequisites
 - Adobe After Effects (2022 or later)
-- Node.js (v14 or later)
+- Node.js (v18 or later)
 - npm or yarn package manager
 
 ### 📥 Installation
@@ -95,7 +95,43 @@
    ```
    This will copy the necessary scripts to your After Effects installation.
 
+### Guided browser setup
+
+After building the project, launch the local setup dashboard:
+
+```bash
+npm run setup
+```
+
+The command opens a page in Chrome (or the default browser when Chrome is unavailable) that can:
+
+- Detect installed versions of After Effects
+- Track first-run progress across panel installation, MCP client configuration, panel connection, and connection testing
+- Install or update the bridge panel, backing up an existing panel first
+- Generate configuration for Codex, Claude, and Cursor
+- Configure and validate supported MCP clients with an automatic backup
+- Open the shared bridge folder
+- Run a read-only connection test against the open After Effects panel
+- Monitor the panel heartbeat, command queue, recent results, and logs
+- Choose read-only, standard-editing, or full-access safety modes
+- Automatically preserve the last saved project state before high-impact commands, blocking the command if the backup fails
+- Keep everyday controls simple while placing polling, expiry, timeout, batching, and retention controls under Advanced settings
+- Explore all bridge commands and test strictly read-only tools
+- Restore or safely uninstall the panel, archive bridge data, check for updates, and export sanitized diagnostics
+
+The dashboard binds only to `127.0.0.1`, uses a random token for the setup session, and stops when you close it from the page or stop the terminal command. It is not required during normal MCP use.
+
+The MCP server can inspect the same state without screen-reading. It exposes the `aftereffects://dashboard/status` resource and the read-only `get-dashboard-status` tool, including the panel heartbeat, active safety mode, queue depth, and retained-result count.
+
+When this project is installed as an npm package, the equivalent command is:
+
+```bash
+npx after-effects-mcp setup
+```
+
 ### 🔧 Update MCP Config
+
+The setup dashboard above generates a configuration using the exact Node.js and server paths on the current machine. This is the recommended option for most users.
 
 #### Option 1: Using .mcp.json (Recommended for Claude Code)
 The repository includes a `.mcp.json` file for easy configuration. Copy or reference it in your MCP settings:
@@ -224,6 +260,11 @@ You can animate layers with:
 | `saveProject`               | Save, or Save As a path (won't overwrite without `overwrite`) |
 | `openProject` / `newProject`| Replace the open project (`saveCurrent` must be stated) |
 | `undo`                      | Undo the last N bridge commands       |
+| `addExpressionControl`      | Add a slider, checkbox, colour, dropdown, angle, point or layer control and get the expression that reads it |
+| `getPropertyReference` / `linkProperty` | The expression that reads a property / link one property to another (like the pick whip) |
+| `setCameraProperties`       | Edit a camera: zoom, depth of field, focus, aperture, one or two node, position |
+| `createLight` / `setLightProperties` | Create and edit point, spot, parallel and ambient lights |
+| `backupProject`             | Copy the project file to a timestamped backup |
 | `getCapabilities`           | Bridge version and the list of commands the panel supports |
 | `setKeyframeEase`           | Easy ease, hold, linear or custom bezier on keyframes |
 | `offsetKeyframes` / `copyKeyframes` | Move keyframes, or copy them to another property or layer |

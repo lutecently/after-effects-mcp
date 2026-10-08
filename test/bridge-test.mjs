@@ -427,6 +427,74 @@ async function main() {
     const after = await run("getRenderStatus");
     check("...and left the render queue as it found it", before.numItems === after.numItems, `${before.numItems} -> ${after.numItems}`);
 
+    console.log("\nExpression controls and links");
+    r = await run("createNullLayer", { compName: MAIN, name: `${PREFIX}controls` });
+    check("createNullLayer for the controls", isOk(r), r.message);
+    r = await run("addExpressionControl", { compName: MAIN, layerName: `${PREFIX}controls`, type: "slider", name: `${PREFIX}amount`, value: 25 });
+    check("addExpressionControl slider returns the expression that reads it", isOk(r) && r.value === 25 && r.expressionReference === `thisComp.layer("${PREFIX}controls").effect("${PREFIX}amount")("Slider")`, JSON.stringify(r.expressionReference));
+    for (const [type, value] of [["checkbox", true], ["color", [1, 0, 0]], ["angle", 90], ["point", [10, 20]]]) {
+      r = await run("addExpressionControl", { compName: MAIN, layerName: `${PREFIX}controls`, type, name: `${PREFIX}${type}`, value });
+      check(`addExpressionControl ${type}`, isOk(r) && /effect\(/.test(r.expressionReference || ""), r.message);
+    }
+    r = await run("addExpressionControl", { compName: MAIN, layerName: `${PREFIX}controls`, type: "dropdown", name: `${PREFIX}menu`, options: ["One", "Two", "Three"], value: 2 });
+    check("addExpressionControl dropdown (or says it needs a newer After Effects)", (isOk(r) && r.value === 2) || (isError(r) && /newer|version/i.test(r.message || "")), r.message || String(r.value));
+    r = await run("addExpressionControl", { compName: MAIN, layerName: `${PREFIX}controls`, type: "banana", name: "x" });
+    check("addExpressionControl rejects an unknown type", isError(r), r.message);
+    r = await run("addExpressionControl", { compName: MAIN, layerName: `${PREFIX}controls`, type: "slider" });
+    check("addExpressionControl needs a name", isError(r), r.message);
+    info = await run("getLayerInfo", { compName: MAIN, layerName: `${PREFIX}controls` });
+    check("a failed addExpressionControl leaves no effect behind", info.layers[0].effects.every((e) => e.name !== "x") && info.layers[0].effects.some((e) => e.name === `${PREFIX}amount`), JSON.stringify(info.layers[0].effects.map((e) => e.name)));
+
+    r = await run("getPropertyReference", { compName: MAIN, layerName: TOOL, propertyName: "Position" });
+    check("getPropertyReference for a transform property uses match names", isOk(r) && r.reference === `thisComp.layer("${TOOL}")("ADBE Transform Group")("ADBE Position")`, r.reference);
+    r = await run("linkProperty", { from: { compName: MAIN, layerName: `${PREFIX}controls`, propertyName: "Slider", effectName: `${PREFIX}amount` }, to: { compName: MAIN, layerName: TOOL, propertyName: "Opacity" } });
+    check("linkProperty makes the target follow the slider", isOk(r) && near(r.value, 25, 0.01), JSON.stringify({ e: r.expression, v: r.value, m: r.message }));
+    r = await run("setEffectProperty", { compName: MAIN, layerName: `${PREFIX}controls`, effectName: `${PREFIX}amount`, propertyName: "Slider", value: 40 });
+    check("change the slider", isOk(r), r.message);
+    r = await run("getKeyframes", { compName: MAIN, layerName: TOOL, propertyName: "Opacity" });
+    check("...and the linked opacity follows it", isOk(r) && r.property.expressionEnabled === true && near(r.property.value, 40, 0.01), JSON.stringify(r.property));
+    r = await run("linkProperty", { from: { compName: MAIN, layerName: `${PREFIX}controls`, propertyName: "Slider", effectName: `${PREFIX}amount` }, to: { compName: MAIN, layerName: TOOL, propertyName: "Opacity" }, factor: 2, offset: 10 });
+    check("linkProperty with factor and offset (40 * 2 + 10)", isOk(r) && near(r.value, 90, 0.01), JSON.stringify({ e: r.expression, v: r.value }));
+    r = await run("linkProperty", { from: { compName: MAIN, layerName: `${PREFIX}controls`, propertyName: "Slider", effectName: `${PREFIX}amount` }, to: { compName: MAIN, layerName: TOOL, propertyName: "Position" } });
+    check("linkProperty refuses different kinds of property", isError(r) && /different kinds/.test(r.message || ""), r.message);
+    r = await run("linkProperty", { from: { compName: MAIN, layerName: `${PREFIX}controls`, propertyName: "Position" }, to: { compName: MAIN, layerName: TOOL, propertyName: "Position" }, factor: 2 });
+    check("linkProperty only allows factor on single-number properties", isError(r), r.message);
+    r = await run("linkProperty", { from: { compName: MAIN, layerName: `${PREFIX}controls`, propertyName: "Slider", effectName: `${PREFIX}amount` }, to: { compName: PRE, layerName: `${PREFIX}red`, propertyName: "Opacity" } });
+    check("linkProperty refuses properties in different comps", isError(r) && /same comp/.test(r.message || ""), r.message);
+    r = await run("setLayerExpression", { compName: MAIN, layerName: TOOL, propertyName: "Opacity", expressionString: "" });
+    check("remove the link expression", isOk(r), r.message);
+
+    console.log("\nCamera and lights");
+    r = await run("createCamera", { compName: MAIN, name: `${PREFIX}cam`, zoom: 1500, position: [540, 960, -1500] });
+    check("createCamera", isOk(r), r.message);
+    r = await run("setCameraProperties", { compName: MAIN, layerName: `${PREFIX}cam`, zoom: 2000, depthOfField: true, focusDistance: 1800, aperture: 40, blurLevel: 150 });
+    check("setCameraProperties", isOk(r) && near(r.camera.zoom, 2000, 0.5) && r.camera.depthOfField === true && near(r.camera.focusDistance, 1800, 0.5) && near(r.camera.aperture, 40, 0.5) && near(r.camera.blurLevel, 150, 0.5), JSON.stringify({ c: r.camera, s: r.skipped }));
+    r = await run("setCameraProperties", { compName: MAIN, layerName: `${PREFIX}cam`, cameraType: "one-node" });
+    check("setCameraProperties one-node", isOk(r) && r.camera.oneNode === true, JSON.stringify(r.camera));
+    r = await run("setCameraProperties", { compName: MAIN, layerName: `${PREFIX}cam`, cameraType: "banana" });
+    check("setCameraProperties rejects an unknown camera type", isError(r), r.message);
+    r = await run("setCameraProperties", { compName: MAIN, layerName: TOOL, zoom: 100 });
+    check("setCameraProperties refuses a layer that is not a camera", isError(r) && /not a camera/.test(r.message || ""), r.message);
+    r = await run("createLight", { compName: MAIN, name: `${PREFIX}light`, lightType: "spot", intensity: 120, coneAngle: 60, color: [1, 0.9, 0.8] });
+    check("createLight spot", isOk(r) && r.light.lightType === "spot" && near(r.light.intensity, 120, 0.5) && near(r.light.coneAngle, 60, 0.5), JSON.stringify({ l: r.light, s: r.skipped }));
+    r = await run("setLightProperties", { compName: MAIN, layerName: `${PREFIX}light`, intensity: 80, lightType: "point" });
+    check("setLightProperties", isOk(r) && r.light.lightType === "point" && near(r.light.intensity, 80, 0.5), JSON.stringify(r.light));
+    r = await run("setLightProperties", { compName: MAIN, layerName: `${PREFIX}cam`, intensity: 5 });
+    check("setLightProperties refuses a layer that is not a light", isError(r) && /not a light/.test(r.message || ""), r.message);
+    r = await run("createLight", { compName: MAIN, name: `${PREFIX}badlight`, lightType: "banana" });
+    check("createLight rejects an unknown type and leaves no layer behind", isError(r));
+    info = await run("getLayerInfo", { compName: MAIN });
+    check("getLayerInfo reports layer types", info.layers.find((l) => l.name === `${PREFIX}cam`)?.type === "camera" && info.layers.find((l) => l.name === `${PREFIX}light`)?.type === "light" && info.layers.find((l) => l.name === TOOL)?.type === "solid" && info.layers.find((l) => l.name === SHAPE)?.type === "shape" && !info.layers.some((l) => l.name === `${PREFIX}badlight`), JSON.stringify(info.layers.map((l) => [l.name, l.type])));
+
+    console.log("\nBackup");
+    const backupDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcptest-backup-"));
+    r = await run("backupProject", { folder: backupDir, label: "mcptest" });
+    check("backupProject copies the project file", isOk(r) && fs.existsSync(r.path) && fs.statSync(r.path).size > 0 && r.path.includes("-mcptest."), JSON.stringify(r));
+    check("...into the folder asked for, as a copy of the saved project", isOk(r) && r.path.startsWith(backupDir) && r.bytes === fs.statSync(r.path).size);
+    r = await run("backupProject", { folder: path.join(backupDir, "no-such-folder") });
+    check("backupProject errors if the folder does not exist", isError(r), r.message);
+    fs.rmSync(backupDir, { recursive: true, force: true });
+
     console.log("\nProject panel");
     const FOLDER = `${PREFIX}folder`, CHILD = `${PREFIX}child`, ALT = `${PREFIX}alt`;
     r = await run("createFolder", { name: FOLDER });
