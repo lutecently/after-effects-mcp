@@ -224,6 +224,11 @@ You can animate layers with:
 | `saveProject`               | Save, or Save As a path (won't overwrite without `overwrite`) |
 | `openProject` / `newProject`| Replace the open project (`saveCurrent` must be stated) |
 | `undo`                      | Undo the last N bridge commands       |
+| `addExpressionControl`      | Add a slider, checkbox, colour, dropdown, angle, point or layer control and get the expression that reads it |
+| `getPropertyReference` / `linkProperty` | The expression that reads a property / link one property to another (like the pick whip) |
+| `setCameraProperties`       | Edit a camera: zoom, depth of field, focus, aperture, one or two node, position |
+| `createLight` / `setLightProperties` | Create and edit point, spot, parallel and ambient lights |
+| `backupProject`             | Copy the project file to a timestamped backup |
 | `getCapabilities`           | Bridge version and the list of commands the panel supports |
 | `setKeyframeEase`           | Easy ease, hold, linear or custom bezier on keyframes |
 | `offsetKeyframes` / `copyKeyframes` | Move keyframes, or copy them to another property or layer |

@@ -409,6 +409,13 @@ Layer/comp management scripts (run via run-script; comps are found by compName, 
 - listEffects: {query?, category?, limit?}. Finds effect display names and match names, so applyEffect does not need guessing
 - listFonts: {query?, limit?}. Finds PostScript font names for setTextDocument (After Effects 24 or later)
 - listRenderTemplates: {}. Render settings and output module templates, for addToRenderQueue
+- addExpressionControl: {compName?, layerIndex|layerName, type (slider|checkbox|color|angle|point|point3d|layer|dropdown), name, value?, options? (dropdown items)}. Adds an Expression Control effect and returns the expression text that reads it
+- getPropertyReference: {compName?, layerIndex|layerName, propertyPath | propertyName (+effectName?)}. The expression text that reads a property, e.g. thisComp.layer("Controller").effect("Speed")("Slider")
+- linkProperty: {from: {compName?, layerIndex|layerName, propertyPath|propertyName, effectName?}, to: {same}, factor?, offset?}. Makes "to" follow "from" with an expression (like the pick whip); factor and offset (single-number properties) give from * factor + offset. Same comp only
+- setCameraProperties: {compName?, layerIndex|layerName (a camera), cameraType? (one-node|two-node), zoom?, depthOfField?, focusDistance?, aperture?, blurLevel?, position?, pointOfInterest?}. createCamera makes the camera
+- createLight: {compName?, name?, lightType? (point|spot|parallel|ambient), intensity?, color? [r,g,b], coneAngle?, coneFeather?, castsShadows?, shadowDarkness?, shadowDiffusion?, position?, pointOfInterest?}
+- setLightProperties: {compName?, layerIndex|layerName (a light)} plus any of the createLight settings
+- backupProject: {folder? (default ~/Documents/ae-mcp-bridge/backups), label?, saveFirst?}. Copies the project file to a timestamped file. That is the last saved state; saveFirst saves the open project in place first
 - deleteProjectItems: {namePrefix (min 4 chars), dryRun?, includeFolders?}. Removes comps/footage/solids whose names start with the prefix (and every layer using them). Folders are kept unless includeFolders is true (then only emptied ones go). For cleaning up scratch items
 - exportFrame: {compName? (default: active comp), time? (seconds, default: comp time), outputPath? (.png; default: ~/Documents/ae-mcp-bridge/frames/), overwrite?, scale? (1 full size, 2 half, 4 quarter)}. Saves one frame as a PNG and returns its path, so you can open the image and check the result
 - getRenderStatus: {}. Render queue items, status and output paths

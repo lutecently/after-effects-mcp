@@ -2015,6 +2015,7 @@ function getLayerInfo(args) {
             var info = {
                 index: layer.index,
                 name: layer.name,
+                type: layerTypeName(layer),
                 enabled: layer.enabled,
                 locked: layer.locked,
                 shy: layer.shy,
@@ -2274,7 +2275,7 @@ function newProject(args) {
 var undoStack = [];
 var readOnlyCommands = {
     getProjectInfo: 1, listCompositions: 1, getLayerInfo: 1, getKeyframes: 1, getProjectStatus: 1,
-    getRenderStatus: 1, exportFrame: 1, getMarkers: 1, listLayerProperties: 1, getProjectTree: 1, openComp: 1, getCapabilities: 1, getSelection: 1, setSelection: 1, setCurrentTime: 1, listEffects: 1, listFonts: 1, listRenderTemplates: 1, "test-animation": 1, bridgeTestEffects: 1
+    getRenderStatus: 1, exportFrame: 1, getMarkers: 1, listLayerProperties: 1, getProjectTree: 1, openComp: 1, getCapabilities: 1, getPropertyReference: 1, backupProject: 1, getSelection: 1, setSelection: 1, setCurrentTime: 1, listEffects: 1, listFonts: 1, listRenderTemplates: 1, "test-animation": 1, bridgeTestEffects: 1
 };
 
 function resultIsError(resultString) {
@@ -3371,6 +3372,269 @@ function listRenderTemplates() {
     }
 }
 
+// ===== Expression controls and links, camera and light, project backup =====
+
+function layerTypeName(layer) {
+    if (layer instanceof CameraLayer) { return "camera"; }
+    if (layer instanceof LightLayer) { return "light"; }
+    if (layer instanceof TextLayer) { return "text"; }
+    if (layer instanceof ShapeLayer) { return "shape"; }
+    if (layer instanceof AVLayer) {
+        if (layer.nullLayer) { return "null"; }
+        var src = layer.source;
+        if (src instanceof CompItem) { return "precomp"; }
+        if (src && src.mainSource instanceof SolidSource) { return "solid"; }
+        return "footage";
+    }
+    return "unknown";
+}
+
+// --- Property references for expressions ---
+function quoteForExpression(text) { return String(text).replace(/\\/g, "\\\\").replace(/"/g, "\\\""); }
+
+// The expression text that reads a property of a layer in the same comp, e.g.
+//   thisComp.layer("Controller").effect("Speed")("Slider")
+//   thisComp.layer("Box")("ADBE Transform Group")("ADBE Position")
+function propertyReference(layer, prop) {
+    var chain = [], g = prop;
+    while (g && g.propertyDepth > 0) { chain.unshift(g); g = g.parentProperty; }
+    var text = 'thisComp.layer("' + quoteForExpression(layer.name) + '")';
+    var insideEffect = false;
+    for (var i = 0; i < chain.length; i++) {
+        var node = chain[i], parent = node.parentProperty;
+        if (node.matchName === "ADBE Effect Parade") { continue; } // the .effect("name") form below stands in for this group
+        if (parent && parent.matchName === "ADBE Effect Parade") {
+            text += '.effect("' + quoteForExpression(node.name) + '")';
+            insideEffect = true;
+        } else if (insideEffect || (parent && parent.propertyType === PropertyType.INDEXED_GROUP)) {
+            text += '("' + quoteForExpression(node.name) + '")';
+        } else {
+            text += '("' + quoteForExpression(node.matchName) + '")';
+        }
+    }
+    return text;
+}
+
+// {compName?, layerIndex|layerName, propertyPath | propertyName (+effectName?)}
+function getPropertyReference(args) {
+    try {
+        var target = resolveTarget(args);
+        var prop = resolveProperty(target.layer, args);
+        return JSON.stringify({ status: "success", layer: { name: target.layer.name, index: target.layer.index }, property: { name: prop.name, matchName: prop.matchName }, reference: propertyReference(target.layer, prop) }, null, 2);
+    } catch (error) { return fail(error); }
+}
+
+// {from: {compName?, layerIndex|layerName, propertyPath | propertyName (+effectName?)}, to: {same}, factor?, offset?}
+// Makes the "to" property follow the "from" property with an expression (like the pick whip). factor and offset
+// (single-number properties only) give: from * factor + offset. Both properties must be in the same comp.
+function linkProperty(args) {
+    var dp = null, oldExpr = "", oldEnabled = false;
+    try {
+        if (!args.from || !args.to) { throw new Error("from and to are required (each names a layer and property)"); }
+        var src = resolveTarget(args.from), dst = resolveTarget(args.to);
+        if (src.comp.id !== dst.comp.id) { throw new Error("Both properties must be in the same comp"); }
+        var sp = resolveProperty(src.layer, args.from);
+        dp = resolveProperty(dst.layer, args.to);
+        if (sp.propertyType !== PropertyType.PROPERTY || dp.propertyType !== PropertyType.PROPERTY) { throw new Error("Both ends must be properties with a value, not groups"); }
+        var st = valueTypeName(sp), dt = valueTypeName(dp);
+        if (st !== dt) { throw new Error("The properties hold different kinds of values (" + st + " and " + dt + ")"); }
+        var scaled = isSet(args.factor) || isSet(args.offset);
+        if (scaled && st !== "1d") { throw new Error("factor and offset only work on single-number properties"); }
+        if (!dp.canSetExpression) { throw new Error("'" + dp.name + "' cannot take an expression"); }
+        if (src.layer.index === dst.layer.index && sp === dp) { throw new Error("A property cannot be linked to itself"); }
+
+        var expr = propertyReference(src.layer, sp);
+        if (scaled) { expr += " * " + (isSet(args.factor) ? Number(args.factor) : 1) + " + " + (isSet(args.offset) ? Number(args.offset) : 0); }
+        oldExpr = dp.expression;
+        oldEnabled = dp.expressionEnabled;
+        dp.expression = expr;
+        var err = "";
+        try { err = dp.expressionError; } catch (e) {}
+        if (err) { throw new Error("After Effects rejected the expression: " + err); }
+        return JSON.stringify({ status: "success", message: "Property linked", from: { layer: src.layer.name, property: sp.name }, to: { layer: dst.layer.name, property: dp.name }, expression: expr, value: safePropertyValue(dp) }, null, 2);
+    } catch (error) {
+        if (dp) { try { dp.expression = oldExpr; if (!oldEnabled) { dp.expressionEnabled = false; } } catch (restoreError) {} }
+        return fail(error);
+    }
+}
+
+// --- Expression controls ---
+var controlTypes = {
+    slider: { match: "ADBE Slider Control", param: "Slider" },
+    checkbox: { match: "ADBE Checkbox Control", param: "Checkbox" },
+    color: { match: "ADBE Color Control", param: "Color" },
+    angle: { match: "ADBE Angle Control", param: "Angle" },
+    point: { match: "ADBE Point Control", param: "Point" },
+    point3d: { match: "ADBE Point3D Control", param: "3D Point" },
+    layer: { match: "ADBE Layer Control", param: "Layer" },
+    dropdown: { match: "ADBE Dropdown Control", param: "Menu" }
+};
+
+// {compName?, layerIndex|layerName, type (slider|checkbox|color|angle|point|point3d|layer|dropdown), name, value?, options? (dropdown items)}
+// Adds an Expression Control effect and returns the expression text that reads it.
+function addExpressionControl(args) {
+    var added = null;
+    try {
+        var layer = resolveTarget(args).layer;
+        var def = controlTypes.hasOwnProperty(args.type) ? controlTypes[args.type] : null;
+        if (!def) {
+            var kinds = [];
+            for (var k in controlTypes) { if (controlTypes.hasOwnProperty(k)) { kinds.push(k); } }
+            throw new Error("type must be one of: " + kinds.join(", "));
+        }
+        if (!args.name) { throw new Error("name is required"); }
+        var parade = layer.property("ADBE Effect Parade");
+        if (!parade || !parade.canAddProperty(def.match)) { throw new Error("Cannot add a " + args.type + " control to layer '" + layer.name + "'"); }
+        added = parade.addProperty(def.match);
+        added.name = String(args.name);
+        var param = findPropertyInsideGroup(added, def.param) || added.property(1);
+        if (args.type === "dropdown") {
+            if (!args.options || !args.options.length) { throw new Error("options (a list of menu items) is required for a dropdown"); }
+            if (typeof param.setPropertyParameters !== "function") { throw new Error("This version of After Effects cannot set dropdown items from a script"); }
+            var items = [];
+            for (var i = 0; i < args.options.length; i++) { items.push(String(args.options[i])); }
+            param.setPropertyParameters(items);
+            // Changing the menu rebuilds the effect, which invalidates the handles above: find them again
+            added = parade.property(String(args.name));
+            param = findPropertyInsideGroup(added, def.param) || added.property(1);
+        }
+        if (isSet(args.value)) { param.setValue(normalizeValue(param, args.value)); }
+        return JSON.stringify({
+            status: "success", message: "Added a " + args.type + " control",
+            control: { name: added.name, type: args.type, parameter: param.name, layer: layer.name },
+            value: safePropertyValue(param),
+            expressionReference: propertyReference(layer, param)
+        }, null, 2);
+    } catch (error) {
+        if (added) { try { added.remove(); } catch (removeError) {} }
+        return fail(error);
+    }
+}
+
+// --- Camera and light ---
+function setNumericOptions(group, map, args, changed, skipped) {
+    for (var key in map) {
+        if (!map.hasOwnProperty(key) || !isSet(args[key])) { continue; }
+        try {
+            var prop = group.property(map[key]);
+            if (!prop) { throw new Error("no such property"); }
+            var v = args[key];
+            prop.setValue(typeof v === "boolean" ? (v ? 1 : 0) : normalizeValue(prop, v));
+            changed.push(key);
+        } catch (e) { skipped.push(key + ": " + e.toString()); }
+    }
+}
+
+// {compName?, layerIndex|layerName (a camera), cameraType? ("one-node"|"two-node"), zoom?, depthOfField? (bool), focusDistance?,
+//  aperture?, blurLevel?, position? [x,y,z], pointOfInterest? [x,y,z]}
+function setCameraProperties(args) {
+    try {
+        var layer = resolveTarget(args).layer;
+        if (!(layer instanceof CameraLayer)) { throw new Error("Layer '" + layer.name + "' is not a camera"); }
+        var changed = [], skipped = [];
+        if (args.cameraType) {
+            if (args.cameraType === "one-node") { layer.autoOrient = AutoOrientType.NO_AUTO_ORIENT; }
+            else if (args.cameraType === "two-node") { layer.autoOrient = AutoOrientType.CAMERA_OR_POINT_OF_INTEREST; }
+            else { throw new Error("cameraType must be one-node or two-node"); }
+            changed.push("cameraType");
+        }
+        setNumericOptions(layer.property("Camera Options"), { zoom: "Zoom", depthOfField: "Depth of Field", focusDistance: "Focus Distance", aperture: "Aperture", blurLevel: "Blur Level" }, args, changed, skipped);
+        if (isSet(args.position)) { layer.property("Position").setValue(args.position); changed.push("position"); }
+        if (isSet(args.pointOfInterest)) {
+            try { layer.property("Point of Interest").setValue(args.pointOfInterest); changed.push("pointOfInterest"); }
+            catch (e) { skipped.push("pointOfInterest: a one-node camera has none"); }
+        }
+        if (changed.length === 0 && skipped.length === 0) { throw new Error("Nothing to change: give cameraType, zoom, depthOfField, focusDistance, aperture, blurLevel, position or pointOfInterest"); }
+        var opts = layer.property("Camera Options");
+        return JSON.stringify({
+            status: "success", message: "Camera updated",
+            layer: { name: layer.name, index: layer.index },
+            changed: changed, skipped: skipped,
+            camera: { oneNode: layer.autoOrient === AutoOrientType.NO_AUTO_ORIENT, zoom: opts.property("Zoom").value, depthOfField: opts.property("Depth of Field").value === 1, focusDistance: opts.property("Focus Distance").value, aperture: opts.property("Aperture").value, blurLevel: opts.property("Blur Level").value, position: layer.property("Position").value }
+        }, null, 2);
+    } catch (error) { return fail(error); }
+}
+
+var lightTypes = { point: "POINT", spot: "SPOT", parallel: "PARALLEL", ambient: "AMBIENT" };
+
+function applyLightOptions(layer, args, changed, skipped) {
+    if (args.lightType) {
+        if (!lightTypes.hasOwnProperty(args.lightType)) { throw new Error("lightType must be point, spot, parallel or ambient"); }
+        layer.lightType = LightType[lightTypes[args.lightType]];
+        changed.push("lightType");
+    }
+    setNumericOptions(layer.property("Light Options"), { intensity: "Intensity", color: "Color", coneAngle: "Cone Angle", coneFeather: "Cone Feather", castsShadows: "Casts Shadows", shadowDarkness: "Shadow Darkness", shadowDiffusion: "Shadow Diffusion" }, args, changed, skipped);
+    if (isSet(args.position)) { layer.property("Position").setValue(args.position); changed.push("position"); }
+    if (isSet(args.pointOfInterest)) {
+        try { layer.property("Point of Interest").setValue(args.pointOfInterest); changed.push("pointOfInterest"); }
+        catch (e) { skipped.push("pointOfInterest: this light type has none"); }
+    }
+}
+
+function lightSummary(layer) {
+    var o = layer.property("Light Options");
+    var names = { };
+    names[LightType.POINT] = "point"; names[LightType.SPOT] = "spot"; names[LightType.PARALLEL] = "parallel"; names[LightType.AMBIENT] = "ambient";
+    var info = { lightType: names[layer.lightType], intensity: o.property("Intensity").value, color: o.property("Color").value, position: layer.property("Position").value };
+    try { info.coneAngle = o.property("Cone Angle").value; } catch (e) {}
+    return info;
+}
+
+// {compName?, name?, lightType? ("point"|"spot"|"parallel"|"ambient", default point), intensity?, color? [r,g,b], coneAngle?, coneFeather?,
+//  castsShadows?, shadowDarkness?, shadowDiffusion?, position? [x,y,z], pointOfInterest?}
+function createLight(args) {
+    var layer = null;
+    try {
+        var comp = resolveComp(args.compName || "");
+        layer = comp.layers.addLight(args.name ? String(args.name) : "Light", [comp.width / 2, comp.height / 2]);
+        var changed = [], skipped = [];
+        applyLightOptions(layer, args, changed, skipped);
+        return JSON.stringify({ status: "success", message: "Light created", layer: { name: layer.name, index: layer.index }, changed: changed, skipped: skipped, light: lightSummary(layer) }, null, 2);
+    } catch (error) {
+        if (layer) { try { layer.remove(); } catch (removeError) {} }
+        return fail(error);
+    }
+}
+
+// {compName?, layerIndex|layerName (a light), lightType?, intensity?, color?, coneAngle?, coneFeather?, castsShadows?,
+//  shadowDarkness?, shadowDiffusion?, position?, pointOfInterest?}
+function setLightProperties(args) {
+    try {
+        var layer = resolveTarget(args).layer;
+        if (!(layer instanceof LightLayer)) { throw new Error("Layer '" + layer.name + "' is not a light"); }
+        var changed = [], skipped = [];
+        applyLightOptions(layer, args, changed, skipped);
+        if (changed.length === 0 && skipped.length === 0) { throw new Error("Nothing to change: give lightType, intensity, color, coneAngle, coneFeather, castsShadows, shadowDarkness, shadowDiffusion, position or pointOfInterest"); }
+        return JSON.stringify({ status: "success", message: "Light updated", layer: { name: layer.name, index: layer.index }, changed: changed, skipped: skipped, light: lightSummary(layer) }, null, 2);
+    } catch (error) { return fail(error); }
+}
+
+function padTwo(n) { return (n < 10 ? "0" : "") + n; }
+
+// --- backupProject ---
+// {folder? (default ~/Documents/ae-mcp-bridge/backups), label?, saveFirst?}
+// Copies the project file on disk to a timestamped file. That is the last SAVED state; unsaved changes are not in it,
+// unless saveFirst is true, which saves the open project in place first (changing the user's file).
+function backupProject(args) {
+    try {
+        args = args || {};
+        var proj = app.project;
+        if (!proj.file) { throw new Error("The project has never been saved, so there is no file to copy. Save it first with saveProject and a path"); }
+        if (args.saveFirst) { proj.save(); }
+        var folder = args.folder ? new Folder(args.folder) : getBridgeSubfolder("backups");
+        if (!folder.exists) { throw new Error("Folder does not exist: " + folder.fsName); }
+        var d = new Date();
+        var stamp = d.getFullYear() + padTwo(d.getMonth() + 1) + padTwo(d.getDate()) + "-" + padTwo(d.getHours()) + padTwo(d.getMinutes()) + padTwo(d.getSeconds());
+        var base = decodeURI(proj.file.name).replace(/\.aepx?$/i, "");
+        var label = args.label ? "-" + String(args.label).replace(/[^A-Za-z0-9_\-]+/g, "_") : "";
+        var ext = /\.aepx$/i.test(proj.file.name) ? ".aepx" : ".aep";
+        var target = new File(folder.fsName + "/" + base + "-" + stamp + label + ext);
+        if (target.exists) { throw new Error("Backup already exists: " + target.fsName + " (try again in a second)"); }
+        if (!proj.file.copy(target.fsName)) { throw new Error("Could not copy the project file to " + target.fsName); }
+        return JSON.stringify({ status: "success", message: args.saveFirst ? "Project saved, then backed up" : "Backed up the last saved state (unsaved changes are not included)", path: target.fsName, bytes: target.length, source: proj.file.fsName, savedFirst: !!args.saveFirst }, null, 2);
+    } catch (error) { return fail(error); }
+}
+
 // Every command the panel runs. This table is the single list of commands: the server forwards any name and
 // the panel rejects the ones that are not here.
 var commandTable = {
@@ -3443,7 +3707,14 @@ var commandTable = {
     "setWorkArea": function (args) { return setWorkArea(args); },
     "listEffects": function (args) { return listEffects(args); },
     "listFonts": function (args) { return listFonts(args); },
-    "listRenderTemplates": function (args) { return listRenderTemplates(); }
+    "listRenderTemplates": function (args) { return listRenderTemplates(); },
+    "getPropertyReference": function (args) { return getPropertyReference(args); },
+    "linkProperty": function (args) { return linkProperty(args); },
+    "addExpressionControl": function (args) { return addExpressionControl(args); },
+    "setCameraProperties": function (args) { return setCameraProperties(args); },
+    "createLight": function (args) { return createLight(args); },
+    "setLightProperties": function (args) { return setLightProperties(args); },
+    "backupProject": function (args) { return backupProject(args); }
 };
 
 // Execute command
@@ -3458,7 +3729,7 @@ function executeCommand(command, args, id) {
         logToPanel("Attempting to execute: " + command); // Log before switch
         // Use a switch statement for clarity
         // One undo step per bridge command, except commands that replace the project, undo, or block on a render
-        var noUndoGroup = { undo: 1, openProject: 1, newProject: 1, saveProject: 1, startRender: 1 };
+        var noUndoGroup = { undo: 1, openProject: 1, newProject: 1, saveProject: 1, startRender: 1, backupProject: 1 };
         var useUndoGroup = !noUndoGroup[command];
         if (useUndoGroup) { app.beginUndoGroup("MCP: " + command); }
         try {
