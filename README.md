@@ -224,6 +224,12 @@ You can animate layers with:
 | `saveProject`               | Save, or Save As a path (won't overwrite without `overwrite`) |
 | `openProject` / `newProject`| Replace the open project (`saveCurrent` must be stated) |
 | `undo`                      | Undo the last N bridge commands       |
+| `getCapabilities`           | Bridge version and the list of commands the panel supports |
+| `setKeyframeEase`           | Easy ease, hold, linear or custom bezier on keyframes |
+| `offsetKeyframes` / `copyKeyframes` | Move keyframes, or copy them to another property or layer |
+| `getSelection` / `setSelection` | What is selected (layers, properties, keys, project items) / change the layer selection |
+| `setCurrentTime` / `setWorkArea` | Move the playhead / set the work area |
+| `listEffects` / `listFonts` / `listRenderTemplates` | Find effect match names, font names and render templates |
 | `setLayerTiming`            | Trim, start time, stretch, time remap |
 | `splitLayer`                | Cut a layer in two at a time          |
 | `setAnchorPoint`            | Set the anchor point (optionally without moving the layer) |
@@ -262,6 +268,7 @@ The server and the **MCP Bridge Auto** panel talk through `~/Documents/ae-mcp-br
 - `queue/<timestamp>-<id>.json`: one file per command, `{id, command, args}`. The panel runs them oldest-first and deletes each file when done. Commands waiting more than 10 minutes expire with an error result.
 - `results/<id>.json`: the result for that command (the newest 100 are kept). Results carry `_commandId`, `_commandExecuted` and `_project`.
 - `ae_mcp_result.json`: still written with the latest result, for older clients.
+- Every result carries `_bridgeVersion`, a fingerprint of the panel script. The server computes the fingerprint of the script it ships, and `get-results` adds a `_warning` when they differ (an out-of-date installed panel). The panel's command table is the one list of commands: the server forwards any valid name and the panel rejects unknown ones with the list of what it has.
 - `ae_command.json`: the old single-file command path still works, but clients that use it can overwrite each other.
 
 Each server instance only reads results for its own command ids, so several clients (for example two Claude sessions) can share one After Effects safely. `id` may only contain letters, digits, `_` and `-`.

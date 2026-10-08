@@ -2274,7 +2274,7 @@ function newProject(args) {
 var undoStack = [];
 var readOnlyCommands = {
     getProjectInfo: 1, listCompositions: 1, getLayerInfo: 1, getKeyframes: 1, getProjectStatus: 1,
-    getRenderStatus: 1, exportFrame: 1, getMarkers: 1, listLayerProperties: 1, getProjectTree: 1, openComp: 1, "test-animation": 1, bridgeTestEffects: 1
+    getRenderStatus: 1, exportFrame: 1, getMarkers: 1, listLayerProperties: 1, getProjectTree: 1, openComp: 1, getCapabilities: 1, getSelection: 1, setSelection: 1, setCurrentTime: 1, listEffects: 1, listFonts: 1, listRenderTemplates: 1, "test-animation": 1, bridgeTestEffects: 1
 };
 
 function resultIsError(resultString) {
@@ -3034,6 +3034,418 @@ function isoTimestamp(d) {
         pad(d.getUTCHours(), 2) + ":" + pad(d.getUTCMinutes(), 2) + ":" + pad(d.getUTCSeconds(), 2) + "." + pad(d.getUTCMilliseconds(), 3) + "Z";
 }
 
+// ===== Bridge version, keyframe easing, context and discovery tools =====
+
+// A fingerprint of this script's own file (FNV-1a over its ASCII characters, ignoring carriage returns). The server
+// computes the same value from the script it ships, so a stale installed panel is detected without anyone bumping a
+// version number. "unknown" if the file cannot be read.
+function computeBridgeVersion() {
+    try {
+        var f = new File($.fileName);
+        f.encoding = "UTF-8";
+        if (!f.open("r")) { return "unknown"; }
+        var text = f.read();
+        f.close();
+        var h = 2166136261;
+        for (var i = 0; i < text.length; i++) {
+            var c = text.charCodeAt(i);
+            if (c > 127 || c === 13) { continue; }
+            h ^= c;
+            h = (h + ((h << 1) + (h << 4) + (h << 7) + (h << 8) + (h << 24))) >>> 0;
+        }
+        return h.toString(16);
+    } catch (e) { return "unknown"; }
+}
+var BRIDGE_VERSION = computeBridgeVersion();
+
+function getCapabilities() {
+    var names = [];
+    for (var name in commandTable) { if (commandTable.hasOwnProperty(name)) { names.push(name); } }
+    names.sort();
+    return JSON.stringify({ status: "success", protocol: 2, bridgeVersion: BRIDGE_VERSION, aeVersion: app.version, commands: names }, null, 2);
+}
+
+// --- Keyframe easing, copying and offsetting ---
+
+// Find the property a command refers to: propertyPath, or propertyName (+ effectName)
+function resolveProperty(layer, args) {
+    if (args.propertyPath && args.propertyPath.length) { return walkPropertyPath(layer, args.propertyPath); }
+    if (args.propertyName) {
+        var prop = findLayerProperty(layer, args.propertyName, args.effectName);
+        if (!prop) { throw new Error("Property '" + args.propertyName + "' not found on layer '" + layer.name + "' (use listLayerProperties to find its path)"); }
+        return prop;
+    }
+    throw new Error("Give propertyPath or propertyName");
+}
+
+// Which keyframes a command applies to: all, keyIndices [..], or time (must hit a key). One of them is required.
+function selectKeyIndices(prop, args, comp) {
+    var n = prop.numKeys;
+    if (n === 0) { throw new Error("Property '" + prop.name + "' has no keyframes"); }
+    var picked = [], i;
+    if (args.all) { for (i = 1; i <= n; i++) { picked.push(i); } }
+    else if (args.keyIndices && args.keyIndices.length) {
+        for (i = 0; i < args.keyIndices.length; i++) {
+            var k = parseInt(args.keyIndices[i], 10);
+            if (!(k >= 1 && k <= n)) { throw new Error("Keyframe index out of range: " + args.keyIndices[i] + " (property has " + n + ")"); }
+            picked.push(k);
+        }
+    } else if (isSet(args.time)) {
+        var nearest = prop.nearestKeyIndex(Number(args.time));
+        if (Math.abs(prop.keyTime(nearest) - Number(args.time)) > comp.frameDuration / 2) {
+            throw new Error("No keyframe at " + args.time + "s (nearest is #" + nearest + " at " + prop.keyTime(nearest) + "s)");
+        }
+        picked.push(nearest);
+    } else { throw new Error("Specify which keyframes: all (true), keyIndices, or time"); }
+    return picked;
+}
+
+function readKeyData(prop, indices) {
+    var keys = [];
+    for (var i = 0; i < indices.length; i++) {
+        var k = indices[i];
+        var key = { time: prop.keyTime(k), value: prop.keyValue(k), inType: prop.keyInInterpolationType(k), outType: prop.keyOutInterpolationType(k) };
+        try { key.inEase = prop.keyInTemporalEase(k); key.outEase = prop.keyOutTemporalEase(k); } catch (e) {}
+        keys.push(key);
+    }
+    return keys;
+}
+
+// Write keys (shifted by offset seconds) into a property, restoring each key's interpolation and ease
+function writeKeyData(prop, keys, offset) {
+    var i;
+    for (i = 0; i < keys.length; i++) { prop.setValueAtTime(keys[i].time + offset, keys[i].value); }
+    for (i = 0; i < keys.length; i++) {
+        var idx = prop.nearestKeyIndex(keys[i].time + offset);
+        // Ease first, interpolation types last: setting an ease turns that side bezier, which would undo hold and linear
+        try { if (keys[i].inEase && keys[i].outEase) { prop.setTemporalEaseAtKey(idx, keys[i].inEase, keys[i].outEase); } } catch (e) {}
+        try { prop.setInterpolationTypeAtKey(idx, keys[i].inType, keys[i].outType); } catch (e2) {}
+    }
+}
+
+function easeSummary(eases) {
+    var out = [];
+    for (var i = 0; i < eases.length; i++) { out.push({ speed: eases[i].speed, influence: eases[i].influence }); }
+    return out;
+}
+
+function makeEases(count, speed, influence) {
+    var eases = [];
+    for (var i = 0; i < count; i++) { eases.push(new KeyframeEase(speed, influence)); }
+    return eases;
+}
+
+// {compName?, layerIndex|layerName, propertyPath | propertyName (+effectName?), all | keyIndices | time,
+//  preset ("easyEase"|"easyEaseIn"|"easyEaseOut"|"linear"|"hold"|"bezier"), inSpeed?, inInfluence?, outSpeed?, outInfluence?}
+// "bezier" with no numbers is the same as easyEase; give speeds/influences (influence 0.1-100) for a custom curve.
+function setKeyframeEase(args) {
+    try {
+        var target = resolveTarget(args);
+        var prop = resolveProperty(target.layer, args);
+        var presets = { easyEase: 1, easyEaseIn: 1, easyEaseOut: 1, linear: 1, hold: 1, bezier: 1 };
+        if (!args.preset || !presets.hasOwnProperty(args.preset)) { throw new Error("preset must be one of: easyEase, easyEaseIn, easyEaseOut, linear, hold, bezier"); }
+        if (!prop.canVaryOverTime) { throw new Error("'" + prop.name + "' cannot be keyframed"); }
+        var indices = selectKeyIndices(prop, args, target.comp);
+        var inSpeed = isSet(args.inSpeed) ? Number(args.inSpeed) : 0, outSpeed = isSet(args.outSpeed) ? Number(args.outSpeed) : 0;
+        var inInfl = isSet(args.inInfluence) ? Number(args.inInfluence) : 33.333333, outInfl = isSet(args.outInfluence) ? Number(args.outInfluence) : 33.333333;
+        if (!(inInfl >= 0.1 && inInfl <= 100 && outInfl >= 0.1 && outInfl <= 100)) { throw new Error("influence must be between 0.1 and 100"); }
+
+        var done = [];
+        for (var i = 0; i < indices.length; i++) {
+            var k = indices[i];
+            var inType = prop.keyInInterpolationType(k), outType = prop.keyOutInterpolationType(k);
+            var dims = prop.keyInTemporalEase(k).length;
+            var p = args.preset;
+            var setIn = (p === "easyEase" || p === "easyEaseIn" || p === "bezier");
+            var setOut = (p === "easyEase" || p === "easyEaseOut" || p === "bezier");
+            var useNumbers = (p === "bezier");
+            if (p === "linear") { inType = KeyframeInterpolationType.LINEAR; outType = KeyframeInterpolationType.LINEAR; }
+            else if (p === "hold") { outType = KeyframeInterpolationType.HOLD; }
+            else {
+                if (setIn) { inType = KeyframeInterpolationType.BEZIER; }
+                if (setOut) { outType = KeyframeInterpolationType.BEZIER; }
+            }
+            // Setting an ease turns that side bezier, so set the ease first and the interpolation types last
+            if (setIn && setOut) { prop.setTemporalEaseAtKey(k, makeEases(dims, useNumbers ? inSpeed : 0, useNumbers ? inInfl : 33.333333), makeEases(dims, useNumbers ? outSpeed : 0, useNumbers ? outInfl : 33.333333)); }
+            else if (setIn) { prop.setTemporalEaseAtKey(k, makeEases(dims, 0, 33.333333)); }
+            else if (setOut) { prop.setTemporalEaseAtKey(k, prop.keyInTemporalEase(k), makeEases(dims, 0, 33.333333)); }
+            prop.setInterpolationTypeAtKey(k, inType, outType);
+            done.push({ index: k, time: prop.keyTime(k), inInterpolation: interpolationName(prop.keyInInterpolationType(k)), outInterpolation: interpolationName(prop.keyOutInterpolationType(k)), inEase: easeSummary(prop.keyInTemporalEase(k)), outEase: easeSummary(prop.keyOutTemporalEase(k)) });
+        }
+        return JSON.stringify({ status: "success", message: "Keyframe ease set (" + args.preset + ")", layer: { name: target.layer.name, index: target.layer.index }, property: { name: prop.name }, keyframes: done }, null, 2);
+    } catch (error) { return fail(error); }
+}
+
+// {compName?, layerIndex|layerName, propertyPath | propertyName (+effectName?), by (seconds, may be negative), all | keyIndices | time}
+function offsetKeyframes(args) {
+    try {
+        var target = resolveTarget(args);
+        var prop = resolveProperty(target.layer, args);
+        if (!isSet(args.by) || isNaN(Number(args.by))) { throw new Error("by (seconds) is required"); }
+        var by = Number(args.by);
+        var indices = selectKeyIndices(prop, args, target.comp);
+        var keys = readKeyData(prop, indices);
+        for (var m = 0; m < keys.length; m++) {
+            if (keys[m].time + by < 0) { throw new Error("That would move a keyframe before time 0"); }
+        }
+        indices.sort(function (x, y) { return y - x; }); // remove from the end so indices stay valid
+        for (var r = 0; r < indices.length; r++) { prop.removeKey(indices[r]); }
+        writeKeyData(prop, keys, by);
+        var times = [];
+        for (var k = 1; k <= prop.numKeys; k++) { times.push(prop.keyTime(k)); }
+        return JSON.stringify({ status: "success", message: "Moved " + keys.length + " keyframe(s) by " + by + "s", layer: { name: target.layer.name, index: target.layer.index }, property: { name: prop.name, numKeyframes: prop.numKeys, keyTimes: times } }, null, 2);
+    } catch (error) { return fail(error); }
+}
+
+// {from: {compName?, layerIndex|layerName, propertyPath | propertyName (+effectName?)}, to: {same}, timeOffset? (seconds), clear? (remove the target's keys first)}
+// Copies every keyframe with its value, interpolation and ease. The two properties must hold the same kind of value.
+function copyKeyframes(args) {
+    try {
+        if (!args.from || !args.to) { throw new Error("from and to are required (each names a comp, layer and property)"); }
+        var src = resolveTarget(args.from), dst = resolveTarget(args.to);
+        var srcProp = resolveProperty(src.layer, args.from), dstProp = resolveProperty(dst.layer, args.to);
+        if (srcProp.numKeys === 0) { throw new Error("The source property has no keyframes"); }
+        if (valueTypeName(srcProp) !== valueTypeName(dstProp)) {
+            throw new Error("The properties hold different kinds of values (" + valueTypeName(srcProp) + " and " + valueTypeName(dstProp) + ")");
+        }
+        var offset = isSet(args.timeOffset) ? Number(args.timeOffset) : 0;
+        var all = [];
+        for (var i = 1; i <= srcProp.numKeys; i++) { all.push(i); }
+        var keys = readKeyData(srcProp, all);
+        for (var m = 0; m < keys.length; m++) { if (keys[m].time + offset < 0) { throw new Error("That would put a keyframe before time 0"); } }
+        if (args.clear) { for (var r = dstProp.numKeys; r >= 1; r--) { dstProp.removeKey(r); } }
+        writeKeyData(dstProp, keys, offset);
+        return JSON.stringify({ status: "success", message: "Copied " + keys.length + " keyframe(s)", from: { layer: src.layer.name, property: srcProp.name }, to: { layer: dst.layer.name, property: dstProp.name, numKeyframes: dstProp.numKeys } }, null, 2);
+    } catch (error) { return fail(error); }
+}
+
+// --- Context: what the user is looking at, and the playhead ---
+function selectedPropertyInfo(p) {
+    var path = [], g = p;
+    while (g && g.propertyDepth > 0) { path.unshift(g.name); g = g.parentProperty; }
+    var info = { name: p.name, matchName: p.matchName, path: path, kind: propertyKind(p) };
+    try { var owner = p.propertyGroup(p.propertyDepth); info.layerIndex = owner.index; info.layerName = owner.name; } catch (e) {}
+    try { if (p.propertyType === PropertyType.PROPERTY && p.selectedKeys && p.selectedKeys.length) { info.selectedKeys = p.selectedKeys; } } catch (e2) {}
+    return info;
+}
+
+// {}. The active comp (with playhead and work area), selected layers, selected properties and selected Project panel items.
+function getSelection() {
+    try {
+        var out = { status: "success", activeComp: null, selectedLayers: [], selectedProperties: [], selectedProjectItems: [] };
+        var comp = app.project.activeItem instanceof CompItem ? app.project.activeItem : null;
+        var i;
+        if (comp) {
+            out.activeComp = { name: comp.name, id: comp.id, time: comp.time, frame: Math.round(comp.time / comp.frameDuration), duration: comp.duration, frameRate: comp.frameRate, workAreaStart: comp.workAreaStart, workAreaDuration: comp.workAreaDuration, workAreaEnd: comp.workAreaStart + comp.workAreaDuration };
+            var layers = comp.selectedLayers;
+            for (i = 0; i < layers.length; i++) { out.selectedLayers.push({ index: layers[i].index, name: layers[i].name }); }
+            var props = comp.selectedProperties;
+            for (i = 0; i < props.length; i++) { try { out.selectedProperties.push(selectedPropertyInfo(props[i])); } catch (e) {} }
+        }
+        var items = app.project.selection;
+        for (i = 0; i < items.length; i++) { out.selectedProjectItems.push({ id: items[i].id, name: items[i].name, type: projectItemType(items[i]) }); }
+        return JSON.stringify(out, null, 2);
+    } catch (error) { return fail(error); }
+}
+
+// {compName?, layerIndices? [..] | layerNames? [..], additive? (keep the current selection), clear? (just deselect everything)}
+function setSelection(args) {
+    try {
+        var comp = resolveTarget(args, false).comp;
+        var i;
+        if (!args.additive) { for (i = 1; i <= comp.numLayers; i++) { comp.layer(i).selected = false; } }
+        var picked = [];
+        if (args.layerIndices && args.layerIndices.length) {
+            for (i = 0; i < args.layerIndices.length; i++) { picked.push(resolveLayer(comp, args.layerIndices[i], "")); }
+        } else if (args.layerNames && args.layerNames.length) {
+            for (i = 0; i < args.layerNames.length; i++) { picked.push(resolveLayer(comp, null, args.layerNames[i])); }
+        } else if (!args.clear) { throw new Error("Give layerIndices or layerNames, or clear: true"); }
+        for (i = 0; i < picked.length; i++) { picked[i].selected = true; }
+        var now = [];
+        for (i = 1; i <= comp.numLayers; i++) { if (comp.layer(i).selected) { now.push({ index: i, name: comp.layer(i).name }); } }
+        return JSON.stringify({ status: "success", message: "Selection set", composition: comp.name, selectedLayers: now }, null, 2);
+    } catch (error) { return fail(error); }
+}
+
+// {compName?, time? (seconds) | frame?}. Moves the playhead.
+function setCurrentTime(args) {
+    try {
+        var comp = resolveTarget(args, false).comp;
+        var t;
+        if (isSet(args.time)) { t = Number(args.time); }
+        else if (isSet(args.frame)) { t = Number(args.frame) * comp.frameDuration; }
+        else { throw new Error("Give time (seconds) or frame"); }
+        if (!(t >= 0) || t > comp.duration) { throw new Error("That time is outside the comp (0 to " + comp.duration + " seconds)"); }
+        comp.time = t;
+        return JSON.stringify({ status: "success", message: "Playhead moved", composition: comp.name, time: comp.time, frame: Math.round(comp.time / comp.frameDuration) }, null, 2);
+    } catch (error) { return fail(error); }
+}
+
+// {compName?, start? (seconds), duration? | end?}. Sets the work area; anything left out stays as it is.
+function setWorkArea(args) {
+    try {
+        var comp = resolveTarget(args, false).comp;
+        var start = isSet(args.start) ? Number(args.start) : comp.workAreaStart;
+        var duration;
+        if (isSet(args.duration)) { duration = Number(args.duration); }
+        else if (isSet(args.end)) { duration = Number(args.end) - start; }
+        else { duration = comp.workAreaDuration; }
+        if (!(start >= 0) || !(duration > 0) || start + duration > comp.duration + comp.frameDuration / 2) {
+            throw new Error("The work area must be inside the comp (0 to " + comp.duration + " seconds) and have a positive length");
+        }
+        // Shorten first when moving later, so the old and new values never overlap illegally
+        comp.workAreaDuration = Math.min(duration, comp.duration - comp.workAreaStart);
+        comp.workAreaStart = start;
+        comp.workAreaDuration = duration;
+        return JSON.stringify({ status: "success", message: "Work area set", composition: comp.name, workAreaStart: comp.workAreaStart, workAreaDuration: comp.workAreaDuration, workAreaEnd: comp.workAreaStart + comp.workAreaDuration }, null, 2);
+    } catch (error) { return fail(error); }
+}
+
+// --- Discovery ---
+function matchesQuery(query, parts) {
+    if (!query) { return true; }
+    var q = String(query).toLowerCase();
+    for (var i = 0; i < parts.length; i++) { if (String(parts[i]).toLowerCase().indexOf(q) >= 0) { return true; } }
+    return false;
+}
+
+// {query? (matches name, match name or category), category?, limit? (default 100, max 500)}
+function listEffects(args) {
+    try {
+        args = args || {};
+        var limit = Math.min(isSet(args.limit) ? Number(args.limit) : 100, 500);
+        var out = [], total = 0;
+        for (var i = 0; i < app.effects.length; i++) {
+            var e = app.effects[i];
+            if (args.category && String(e.category).toLowerCase() !== String(args.category).toLowerCase()) { continue; }
+            if (!matchesQuery(args.query, [e.displayName, e.matchName, e.category])) { continue; }
+            total++;
+            if (out.length < limit) { out.push({ name: e.displayName, matchName: e.matchName, category: e.category }); }
+        }
+        return JSON.stringify({ status: "success", total: total, returned: out.length, effects: out }, null, 2);
+    } catch (error) { return fail(error); }
+}
+
+// {query? (matches font, family, style or PostScript name), limit? (default 100, max 500)}
+function listFonts(args) {
+    try {
+        args = args || {};
+        if (!app.fonts || !app.fonts.allFonts) { throw new Error("This version of After Effects cannot list fonts to scripts (needs 24.0 or later)"); }
+        var limit = Math.min(isSet(args.limit) ? Number(args.limit) : 100, 500);
+        var families = app.fonts.allFonts, out = [], total = 0;
+        for (var f = 0; f < families.length; f++) {
+            for (var s = 0; s < families[f].length; s++) {
+                var font = families[f][s];
+                if (!matchesQuery(args.query, [font.postScriptName, font.familyName, font.styleName, font.fullName])) { continue; }
+                total++;
+                if (out.length < limit) { out.push({ postScriptName: font.postScriptName, family: font.familyName, style: font.styleName }); }
+            }
+        }
+        return JSON.stringify({ status: "success", total: total, returned: out.length, fonts: out }, null, 2);
+    } catch (error) { return fail(error); }
+}
+
+// {}. Render settings and output module templates, for addToRenderQueue's outputModuleTemplate.
+function listRenderTemplates() {
+    var temp = null;
+    try {
+        var rq = app.project.renderQueue;
+        var item;
+        if (rq.numItems > 0) { item = rq.item(1); }
+        else {
+            var comp = null;
+            for (var i = 1; i <= app.project.numItems && !comp; i++) { if (app.project.item(i) instanceof CompItem) { comp = app.project.item(i); } }
+            if (!comp) { throw new Error("The project has no comp, so there is nothing to read the templates through"); }
+            temp = rq.items.add(comp); // a queue item is needed to read templates; removed again below
+            item = temp;
+        }
+        var render = [], output = [], t;
+        var rt = item.templates, ot = item.outputModule(1).templates;
+        for (t = 0; t < rt.length; t++) { if (String(rt[t]).indexOf("_HIDDEN") !== 0) { render.push(rt[t]); } }
+        for (t = 0; t < ot.length; t++) { if (String(ot[t]).indexOf("_HIDDEN") !== 0) { output.push(ot[t]); } }
+        return JSON.stringify({ status: "success", renderSettingsTemplates: render, outputModuleTemplates: output }, null, 2);
+    } catch (error) {
+        return fail(error);
+    } finally {
+        if (temp) { try { temp.remove(); } catch (e) {} }
+    }
+}
+
+// Every command the panel runs. This table is the single list of commands: the server forwards any name and
+// the panel rejects the ones that are not here.
+var commandTable = {
+    "getProjectInfo": function (args) { return getProjectInfo(); },
+    "listCompositions": function (args) { return listCompositions(); },
+    "getLayerInfo": function (args) { return getLayerInfo(args); },
+    "createComposition": function (args) { return createComposition(args); },
+    "createTextLayer": function (args) { return createTextLayer(args); },
+    "createShapeLayer": function (args) { return createShapeLayer(args); },
+    "createSolidLayer": function (args) { return createSolidLayer(args); },
+    "setLayerProperties": function (args) { return setLayerProperties(args); },
+    "setLayerKeyframe": function (args) { return setLayerKeyframe(args); },
+    "setLayerExpression": function (args) { return setLayerExpression(args); },
+    "applyEffect": function (args) { return applyEffect(args); },
+    "applyEffectTemplate": function (args) { return applyEffectTemplate(args); },
+    "bridgeTestEffects": function (args) { return bridgeTestEffects(args); },
+    "createCamera": function (args) { return createCamera(args); },
+    "batchSetLayerProperties": function (args) { return batchSetLayerProperties(args); },
+    "setCompositionProperties": function (args) { return setCompositionProperties(args); },
+    "duplicateLayer": function (args) { return duplicateLayer(args); },
+    "deleteLayer": function (args) { return deleteLayer(args); },
+    "setLayerMask": function (args) { return setLayerMask(args); },
+    "precomposeLayers": function (args) { return precomposeLayers(args); },
+    "addCompToComp": function (args) { return addCompToComp(args); },
+    "setGuideLayer": function (args) { return setGuideLayer(args); },
+    "createNullLayer": function (args) { return createNullLayer(args); },
+    "setLayerParent": function (args) { return setLayerParent(args); },
+    "moveLayer": function (args) { return moveLayer(args); },
+    "importFile": function (args) { return importFile(args); },
+    "renameEffect": function (args) { return renameEffect(args); },
+    "setEffectProperty": function (args) { return setEffectProperty(args); },
+    "addToRenderQueue": function (args) { return addToRenderQueue(args); },
+    "getKeyframes": function (args) { return getKeyframes(args); },
+    "removeKeyframes": function (args) { return removeKeyframes(args); },
+    "removeEffect": function (args) { return removeEffect(args); },
+    "getProjectStatus": function (args) { return getProjectStatus(); },
+    "saveProject": function (args) { return saveProject(args); },
+    "openProject": function (args) { return openProject(args); },
+    "newProject": function (args) { return newProject(args); },
+    "undo": function (args) { return undoCommand(args); },
+    "setLayerTiming": function (args) { return setLayerTiming(args); },
+    "splitLayer": function (args) { return splitLayer(args); },
+    "setAnchorPoint": function (args) { return setAnchorPoint(args); },
+    "setLayerFlags": function (args) { return setLayerFlags(args); },
+    "renameLayer": function (args) { return renameLayer(args); },
+    "addMarker": function (args) { return addMarker(args); },
+    "getMarkers": function (args) { return getMarkers(args); },
+    "removeMarkers": function (args) { return removeMarkers(args); },
+    "listLayerProperties": function (args) { return listLayerProperties(args); },
+    "setProperty": function (args) { return setProperty(args); },
+    "addShapeContent": function (args) { return addShapeContent(args); },
+    "setTextDocument": function (args) { return setTextDocument(args); },
+    "getProjectTree": function (args) { return getProjectTree(args); },
+    "createFolder": function (args) { return createFolder(args); },
+    "moveProjectItems": function (args) { return moveProjectItems(args); },
+    "setProjectItemProperties": function (args) { return setProjectItemProperties(args); },
+    "openComp": function (args) { return openComp(args); },
+    "replaceLayerSource": function (args) { return replaceLayerSource(args); },
+    "deleteProjectItems": function (args) { return deleteProjectItems(args); },
+    "exportFrame": function (args) { return exportFrame(args); },
+    "getRenderStatus": function (args) { return getRenderStatus(); },
+    "startRender": function (args) { return startRender(); },
+    "getCapabilities": function (args) { return getCapabilities(); },
+    "setKeyframeEase": function (args) { return setKeyframeEase(args); },
+    "offsetKeyframes": function (args) { return offsetKeyframes(args); },
+    "copyKeyframes": function (args) { return copyKeyframes(args); },
+    "getSelection": function (args) { return getSelection(); },
+    "setSelection": function (args) { return setSelection(args); },
+    "setCurrentTime": function (args) { return setCurrentTime(args); },
+    "setWorkArea": function (args) { return setWorkArea(args); },
+    "listEffects": function (args) { return listEffects(args); },
+    "listFonts": function (args) { return listFonts(args); },
+    "listRenderTemplates": function (args) { return listRenderTemplates(); }
+};
+
 // Execute command
 function executeCommand(command, args, id) {
     var result = "";
@@ -3050,238 +3462,15 @@ function executeCommand(command, args, id) {
         var useUndoGroup = !noUndoGroup[command];
         if (useUndoGroup) { app.beginUndoGroup("MCP: " + command); }
         try {
-        switch (command) {
-            case "getProjectInfo":
-                result = getProjectInfo();
-                break;
-            case "listCompositions":
-                result = listCompositions();
-                break;
-            case "getLayerInfo":
-                result = getLayerInfo(args);
-                break;
-            case "createComposition":
-                logToPanel("Calling createComposition function...");
-                result = createComposition(args);
-                logToPanel("Returned from createComposition.");
-                break;
-            case "createTextLayer":
-                logToPanel("Calling createTextLayer function...");
-                result = createTextLayer(args);
-                logToPanel("Returned from createTextLayer.");
-                break;
-            case "createShapeLayer":
-                logToPanel("Calling createShapeLayer function...");
-                result = createShapeLayer(args);
-                logToPanel("Returned from createShapeLayer. Result type: " + typeof result);
-                break;
-            case "createSolidLayer":
-                logToPanel("Calling createSolidLayer function...");
-                result = createSolidLayer(args);
-                logToPanel("Returned from createSolidLayer.");
-                break;
-            case "setLayerProperties":
-                logToPanel("Calling setLayerProperties function...");
-                result = setLayerProperties(args);
-                logToPanel("Returned from setLayerProperties.");
-                break;
-            case "setLayerKeyframe":
-                logToPanel("Calling setLayerKeyframe function...");
-                result = setLayerKeyframe(args);
-                logToPanel("Returned from setLayerKeyframe.");
-                break;
-            case "setLayerExpression":
-                logToPanel("Calling setLayerExpression function...");
-                result = setLayerExpression(args);
-                logToPanel("Returned from setLayerExpression.");
-                break;
-            case "applyEffect":
-                logToPanel("Calling applyEffect function...");
-                result = applyEffect(args);
-                logToPanel("Returned from applyEffect.");
-                break;
-            case "applyEffectTemplate":
-                logToPanel("Calling applyEffectTemplate function...");
-                result = applyEffectTemplate(args);
-                logToPanel("Returned from applyEffectTemplate.");
-                break;
-            case "bridgeTestEffects":
-                logToPanel("Calling bridgeTestEffects function...");
-                result = bridgeTestEffects(args);
-                logToPanel("Returned from bridgeTestEffects.");
-                break;
-            case "createCamera":
-                logToPanel("Calling createCamera function...");
-                result = createCamera(args);
-                logToPanel("Returned from createCamera.");
-                break;
-            case "batchSetLayerProperties":
-                logToPanel("Calling batchSetLayerProperties function...");
-                result = batchSetLayerProperties(args);
-                logToPanel("Returned from batchSetLayerProperties.");
-                break;
-            case "setCompositionProperties":
-                logToPanel("Calling setCompositionProperties function...");
-                result = setCompositionProperties(args);
-                logToPanel("Returned from setCompositionProperties.");
-                break;
-            case "duplicateLayer":
-                logToPanel("Calling duplicateLayer function...");
-                result = duplicateLayer(args);
-                logToPanel("Returned from duplicateLayer.");
-                break;
-            case "deleteLayer":
-                logToPanel("Calling deleteLayer function...");
-                result = deleteLayer(args);
-                logToPanel("Returned from deleteLayer.");
-                break;
-            case "setLayerMask":
-                logToPanel("Calling setLayerMask function...");
-                result = setLayerMask(args);
-                logToPanel("Returned from setLayerMask.");
-                break;
-            case "precomposeLayers":
-                logToPanel("Calling precomposeLayers function...");
-                result = precomposeLayers(args);
-                logToPanel("Returned from precomposeLayers.");
-                break;
-            case "addCompToComp":
-                logToPanel("Calling addCompToComp function...");
-                result = addCompToComp(args);
-                logToPanel("Returned from addCompToComp.");
-                break;
-            case "setGuideLayer":
-                logToPanel("Calling setGuideLayer function...");
-                result = setGuideLayer(args);
-                logToPanel("Returned from setGuideLayer.");
-                break;
-            case "createNullLayer":
-                logToPanel("Calling createNullLayer function...");
-                result = createNullLayer(args);
-                logToPanel("Returned from createNullLayer.");
-                break;
-            case "setLayerParent":
-                logToPanel("Calling setLayerParent function...");
-                result = setLayerParent(args);
-                logToPanel("Returned from setLayerParent.");
-                break;
-            case "moveLayer":
-                logToPanel("Calling moveLayer function...");
-                result = moveLayer(args);
-                logToPanel("Returned from moveLayer.");
-                break;
-            case "importFile":
-                logToPanel("Calling importFile function...");
-                result = importFile(args);
-                logToPanel("Returned from importFile.");
-                break;
-            case "renameEffect":
-                logToPanel("Calling renameEffect function...");
-                result = renameEffect(args);
-                logToPanel("Returned from renameEffect.");
-                break;
-            case "setEffectProperty":
-                logToPanel("Calling setEffectProperty function...");
-                result = setEffectProperty(args);
-                logToPanel("Returned from setEffectProperty.");
-                break;
-            case "addToRenderQueue":
-                logToPanel("Calling addToRenderQueue function...");
-                result = addToRenderQueue(args);
-                logToPanel("Returned from addToRenderQueue.");
-                break;
-            case "getKeyframes":
-                result = getKeyframes(args);
-                break;
-            case "removeKeyframes":
-                result = removeKeyframes(args);
-                break;
-            case "removeEffect":
-                result = removeEffect(args);
-                break;
-            case "getProjectStatus":
-                result = getProjectStatus();
-                break;
-            case "saveProject":
-                result = saveProject(args);
-                break;
-            case "openProject":
-                result = openProject(args);
-                break;
-            case "newProject":
-                result = newProject(args);
-                break;
-            case "undo":
-                result = undoCommand(args);
-                break;
-            case "setLayerTiming":
-                result = setLayerTiming(args);
-                break;
-            case "splitLayer":
-                result = splitLayer(args);
-                break;
-            case "setAnchorPoint":
-                result = setAnchorPoint(args);
-                break;
-            case "setLayerFlags":
-                result = setLayerFlags(args);
-                break;
-            case "renameLayer":
-                result = renameLayer(args);
-                break;
-            case "addMarker":
-                result = addMarker(args);
-                break;
-            case "getMarkers":
-                result = getMarkers(args);
-                break;
-            case "removeMarkers":
-                result = removeMarkers(args);
-                break;
-            case "listLayerProperties":
-                result = listLayerProperties(args);
-                break;
-            case "setProperty":
-                result = setProperty(args);
-                break;
-            case "addShapeContent":
-                result = addShapeContent(args);
-                break;
-            case "setTextDocument":
-                result = setTextDocument(args);
-                break;
-            case "getProjectTree":
-                result = getProjectTree(args);
-                break;
-            case "createFolder":
-                result = createFolder(args);
-                break;
-            case "moveProjectItems":
-                result = moveProjectItems(args);
-                break;
-            case "setProjectItemProperties":
-                result = setProjectItemProperties(args);
-                break;
-            case "openComp":
-                result = openComp(args);
-                break;
-            case "replaceLayerSource":
-                result = replaceLayerSource(args);
-                break;
-            case "deleteProjectItems":
-                result = deleteProjectItems(args);
-                break;
-            case "exportFrame":
-                result = exportFrame(args);
-                break;
-            case "getRenderStatus":
-                result = getRenderStatus();
-                break;
-            case "startRender":
-                result = startRender();
-                break;
-            default:
-                result = JSON.stringify({ error: "Unknown command: " + command });
+        var handler = commandTable.hasOwnProperty(command) ? commandTable[command] : null;
+        if (handler) {
+            logToPanel("Calling " + command + "...");
+            result = handler(args);
+        } else {
+            var available = [];
+            for (var name in commandTable) { if (commandTable.hasOwnProperty(name)) { available.push(name); } }
+            available.sort();
+            result = JSON.stringify({ error: "Unknown command: " + command, availableCommands: available });
         }
         } finally {
             if (useUndoGroup) { app.endUndoGroup(); }
@@ -3302,6 +3491,7 @@ function executeCommand(command, args, id) {
             // Add a timestamp to help identify if we're getting fresh results
             resultObj._commandExecuted = command;
             if (id) { resultObj._commandId = id; }
+            resultObj._bridgeVersion = BRIDGE_VERSION;
             try { resultObj._project = projectStatus(); } catch (ctxError) {}
             resultObj._responseTimestamp = isoTimestamp(new Date());
             resultString = JSON.stringify(resultObj, null, 2);
@@ -3338,7 +3528,8 @@ function executeCommand(command, args, id) {
                 line: error.line,
                 fileName: error.fileName,
                 _commandId: id || null,
-                _commandExecuted: command
+                _commandExecuted: command,
+                _bridgeVersion: BRIDGE_VERSION
             });
             writeResultFiles(errorResult, id);
             logToPanel("Successfully wrote ERROR to result file.");
