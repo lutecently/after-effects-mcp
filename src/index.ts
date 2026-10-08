@@ -35,109 +35,88 @@ function getAETempDir(): string {
 
 // Headless CLI execution has been removed. All interactions are routed through the Bridge panel.
 
-// Helper function to read results from After Effects temp file
-function readResultsFromTempFile(): string {
+// The bridge stamps every result with the open project (_project). If the project's file changes between results
+// (After Effects restarted, or someone opened another project), add a warning so stale comp/layer assumptions get caught.
+let lastProjectKey: string | null = null;
+function annotateProjectChange(content: string): string {
   try {
-    const tempFilePath = path.join(getAETempDir(), 'ae_mcp_result.json');
-    
-    // Add debugging info
-    console.error(`Checking for results at: ${tempFilePath}`);
-    
-    if (fs.existsSync(tempFilePath)) {
-      // Get file stats to check modification time
-      const stats = fs.statSync(tempFilePath);
-      console.error(`Result file exists, last modified: ${stats.mtime.toISOString()}`);
-      
-      const content = fs.readFileSync(tempFilePath, 'utf8');
-      console.error(`Result file content length: ${content.length} bytes`);
-      
-      // If the result file is older than 30 seconds, warn the user
-      const thirtySecondsAgo = new Date(Date.now() - 30 * 1000);
-      if (stats.mtime < thirtySecondsAgo) {
-        console.error(`WARNING: Result file is older than 30 seconds. After Effects may not be updating results.`);
-        return JSON.stringify({ 
-          warning: "Result file appears to be stale (not recently updated).",
-          message: "This could indicate After Effects is not properly writing results or the MCP Bridge Auto panel isn't running.",
-          lastModified: stats.mtime.toISOString(),
-          originalContent: content
-        });
-      }
-      
-      return content;
-    } else {
-      console.error(`Result file not found at: ${tempFilePath}`);
-      return JSON.stringify({ error: "No results file found. Please run a script in After Effects first." });
+    const parsed = JSON.parse(content);
+    const project = parsed && parsed._project;
+    if (!project) return content;
+    const key = `${project.path ?? "(unsaved)"}`;
+    if (lastProjectKey !== null && key !== lastProjectKey) {
+      parsed._warning = `The open After Effects project changed since the last result (was ${lastProjectKey}, now ${key}). Comps and layers created earlier may not exist; re-check with getProjectStatus / listCompositions.`;
     }
-  } catch (error) {
-    console.error("Error reading results file:", error);
-    return JSON.stringify({ error: `Failed to read results: ${String(error)}` });
+    lastProjectKey = key;
+    return JSON.stringify(parsed, null, 2);
+  } catch {
+    return content;
   }
 }
 
-// Helper to wait for a fresh result produced by a specific command
-async function waitForBridgeResult(expectedCommand?: string, timeoutMs: number = 5000, pollMs: number = 250): Promise<string> {
-  const start = Date.now();
-  const resultPath = path.join(getAETempDir(), 'ae_mcp_result.json');
-  let lastSize = -1;
+// --- Command queue ---
+// Every command is written as its own file in queue/ with a unique id; After Effects runs them oldest-first and writes
+// results/<id>.json. Each server instance only reads results for its own commands, so several clients can share one
+// bridge folder without overwriting each other's commands or reading each other's results.
+function getBridgeSubdir(name: string): string {
+  const dir = path.join(getAETempDir(), name);
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+  return dir;
+}
 
-  while (Date.now() - start < timeoutMs) {
+let lastCommandId: string | null = null;
+let lastQueueFile: string | null = null;
+let commandCounter = 0;
+
+// Queue a command for After Effects and return its id
+function writeCommandFile(command: string, args: Record<string, any> = {}): string {
+  const id = `${process.pid}-${Date.now().toString(36)}-${++commandCounter}`;
+  const queueFile = path.join(getBridgeSubdir('queue'), `${String(Date.now()).padStart(13, '0')}-${id}.json`);
+  const tmpFile = `${queueFile}.tmp`;
+  // Write under a temp name, then rename, so the panel never picks up half a file
+  fs.writeFileSync(tmpFile, JSON.stringify({ id, command, args, timestamp: new Date().toISOString() }, null, 2));
+  fs.renameSync(tmpFile, queueFile);
+  lastCommandId = id;
+  lastQueueFile = queueFile;
+  console.error(`Command "${command}" queued as ${id}`);
+  return id;
+}
+
+// Wait for the result of one specific command. Returns null on timeout.
+async function waitForResult(id: string, timeoutMs: number, pollMs: number = 250): Promise<string | null> {
+  const resultPath = path.join(getBridgeSubdir('results'), `${id}.json`);
+  const start = Date.now();
+  for (;;) {
     if (fs.existsSync(resultPath)) {
       try {
         const content = fs.readFileSync(resultPath, 'utf8');
-        if (content && content.length > 0 && content.length !== lastSize) {
-          lastSize = content.length;
-          try {
-            const parsed = JSON.parse(content);
-            if (!expectedCommand || parsed._commandExecuted === expectedCommand) {
-              return content;
-            }
-          } catch {
-            // not JSON yet; continue polling
-          }
-        }
+        if (content) return annotateProjectChange(content);
       } catch {
-        // transient read error; continue polling
+        // transient read error; try again
       }
     }
+    if (Date.now() - start >= timeoutMs) return null;
     await new Promise(r => setTimeout(r, pollMs));
   }
-  return JSON.stringify({ error: `Timed out waiting for bridge result${expectedCommand ? ` for command '${expectedCommand}'` : ''}.` });
 }
 
-// Helper function to write command to file
-function writeCommandFile(command: string, args: Record<string, any> = {}): void {
-  try {
-    const commandFile = path.join(getAETempDir(), 'ae_command.json');
-    const commandData = {
-      command,
-      args,
-      timestamp: new Date().toISOString(),
-      status: "pending"  // pending, running, completed, error
-    };
-    fs.writeFileSync(commandFile, JSON.stringify(commandData, null, 2));
-    console.error(`Command "${command}" written to ${commandFile}`);
-  } catch (error) {
-    console.error("Error writing command file:", error);
+// Result of the last command this server queued
+async function readLastResult(timeoutMs: number = 8000): Promise<string> {
+  if (!lastCommandId) {
+    return JSON.stringify({ error: "No command has been queued by this server session yet. Run a script first." });
   }
-}
-
-// Helper function to clear the results file to avoid stale cache
-function clearResultsFile(): void {
-  try {
-    const resultFile = path.join(getAETempDir(), 'ae_mcp_result.json');
-    
-    // Write a placeholder message to indicate the file is being reset
-    const resetData = {
-      status: "waiting",
-      message: "Waiting for new result from After Effects...",
-      timestamp: new Date().toISOString()
-    };
-    
-    fs.writeFileSync(resultFile, JSON.stringify(resetData, null, 2));
-    console.error(`Results file cleared at ${resultFile}`);
-  } catch (error) {
-    console.error("Error clearing results file:", error);
-  }
+  const found = await waitForResult(lastCommandId, timeoutMs);
+  if (found) return found;
+  const stillQueued = lastQueueFile !== null && fs.existsSync(lastQueueFile);
+  return JSON.stringify({
+    status: "waiting",
+    commandId: lastCommandId,
+    message: stillQueued
+      ? "The command is queued or still running. If it stays queued, open the MCP Bridge Auto panel in After Effects. A render blocks After Effects until it finishes."
+      : "The command left the queue but no result was found. After Effects may have been closed or the panel reloaded; check its state and resend."
+  });
 }
 
 // Add a resource to expose project compositions
@@ -145,10 +124,9 @@ server.resource(
   "compositions",
   "aftereffects://compositions",
   async (uri) => {
-    // Clear old results, queue the command, and wait for bridge output
-    clearResultsFile();
-    writeCommandFile("listCompositions", {});
-    const result = await waitForBridgeResult("listCompositions", 6000, 250);
+    // Queue the command and wait for its result
+    const id = writeCommandFile("listCompositions", {});
+    const result = (await waitForResult(id, 6000)) ?? JSON.stringify({ error: "Timed out waiting for the bridge result for listCompositions." });
 
     return {
       contents: [{
@@ -190,7 +168,29 @@ server.tool(
       "setCompositionProperties",
       "duplicateLayer",
       "deleteLayer",
-      "setLayerMask"
+      "setLayerMask",
+      "precomposeLayers",
+      "addCompToComp",
+      "setGuideLayer",
+      "setLayerParent",
+      "createNullLayer",
+      "moveLayer",
+      "importFile",
+      "setEffectProperty",
+      "renameEffect",
+      "removeEffect",
+      "getKeyframes",
+      "removeKeyframes",
+      "getProjectStatus",
+      "saveProject",
+      "openProject",
+      "newProject",
+      "undo",
+      "getRenderStatus",
+      "exportFrame",
+      "deleteProjectItems",
+      "startRender",
+      "addToRenderQueue"
     ];
     
     if (!allowedScripts.includes(script)) {
@@ -206,10 +206,7 @@ server.tool(
     }
 
     try {
-      // Clear any stale result data
-      clearResultsFile();
-      
-      // Write command to file for After Effects to pick up
+      // Queue the command for After Effects to pick up
       writeCommandFile(script, parameters);
       
       return {
@@ -239,11 +236,11 @@ server.tool(
 // Add a tool to get the results from the last script execution
 server.tool(
   "get-results",
-  "Get results from the last script executed in After Effects",
+  "Get the result of the last command this server queued in After Effects (waits up to ~8s for it). Results are matched by command id, so other clients sharing the bridge cannot overwrite or be mistaken for yours.",
   {},
   async () => {
     try {
-      const result = readResultsFromTempFile();
+      const result = await readLastResult();
       return {
         content: [
           {
@@ -356,7 +353,7 @@ To use this integration with After Effects, follow these steps:
 Available scripts:
 - getProjectInfo: Information about the current project
 - listCompositions: List all compositions in the project
-- getLayerInfo: Information about layers in the active composition
+- getLayerInfo: {compName|compIndex? (default: active comp), layerIndex|layerName? (default: all layers)}. Returns parent, transform (value, expression, keyframe count), effects, null/3D flags and source for each layer
 - createComposition: Create a new composition
 - createTextLayer: Create a new text layer
 - createShapeLayer: Create a new shape layer
@@ -366,6 +363,33 @@ Available scripts:
 - setLayerExpression: Set an expression for a layer property
 - applyEffect: Apply an effect to a layer
 - applyEffectTemplate: Apply a predefined effect template to a layer
+
+setLayerKeyframe, setLayerExpression, applyEffect and applyEffectTemplate target by compName|compIndex (or the active comp) and layerIndex|layerName.
+
+Layer/comp management scripts (run via run-script; comps are found by compName, layers by layerIndex or layerName):
+- precomposeLayers: {compName, layerIndices[] or layerNames[], newCompName, moveAllAttributes (default true)}
+- addCompToComp: {compName (target), sourceCompName, opacity?, position?}
+- setGuideLayer: {compName, layerIndex|layerName, guideLayer (default true)}
+- createNullLayer: {compName, name?, position? (default comp centre), duration?}
+- setLayerParent: {compName, layerIndex|layerName, parentLayerIndex|parentLayerName, keepTransform? (default true: the layer stays where it is on screen; false keeps its raw values so it may jump)} or {..., clearParent: true}
+- moveLayer: {compName, layerIndex|layerName} plus ONE of: moveTo ("top"|"bottom"), toIndex, aboveLayerIndex|aboveLayerName, belowLayerIndex|belowLayerName
+- importFile: {filePath (absolute), folderName? (created if missing), addToComp? (true adds to compName or the active comp)}
+- setEffectProperty: {compName, layerIndex|layerName, effectName|effectIndex, propertyName, value}. Searches inside that effect only.
+- removeEffect: {compName?, layerIndex|layerName, effectName|effectIndex}
+- getKeyframes: {compName?, layerIndex|layerName, propertyName, effectName?}. Lists keyframes (time, value, interpolation, ease) plus any expression
+- removeKeyframes: {compName?, layerIndex|layerName, propertyName, effectName?} plus ONE of: all (true), keyIndices [..], time (seconds, must hit a keyframe)
+- getProjectStatus: {}. Project name/path, item count, active comp. Every result also carries _project; get-results adds a _warning if the project changed
+- saveProject: {path?, overwrite?}. No path saves in place; a path is Save As (refuses to replace an existing file unless overwrite is true)
+- openProject: {path, saveCurrent (required true/false)}. Closes the current project first (saveCurrent false DISCARDS unsaved changes)
+- newProject: {saveCurrent (required true/false)}. Closes the current project first
+- undo: {steps? (default 1, max 20)}. Undoes the last N bridge commands that changed the project (one undo step per command; returns their names). Does not touch manual edits, and does not cover project/render commands
+- deleteProjectItems: {namePrefix (min 4 chars), dryRun?}. Removes comps/footage/solids whose names start with the prefix (and every layer using them). Folders are kept. For cleaning up scratch items
+- exportFrame: {compName? (default: active comp), time? (seconds, default: comp time), outputPath? (.png; default: ~/Documents/ae-mcp-bridge/frames/), overwrite?, scale? (1 full size, 2 half, 4 quarter)}. Saves one frame as a PNG and returns its path, so you can open the image and check the result
+- getRenderStatus: {}. Render queue items, status and output paths
+- startRender: {}. Renders everything queued. BLOCKS After Effects until done, so a long render outlasts the server's wait; read the outcome later with getRenderStatus / get-results
+- renameEffect: {compName, layerIndex|layerName, effectName|effectIndex, newName}. Expressions referencing the old name must be updated.
+- addToRenderQueue: {compName, outputModuleTemplate?, outputPath?}. Queues only; does not start rendering.
+- setLayerExpression also accepts an optional effectName to look for the property inside that effect only.
 
 Effect Templates:
 - gaussian-blur: Simple Gaussian blur effect
@@ -434,9 +458,13 @@ server.tool(
 // --- BEGIN NEW TOOLS --- 
 
 // Zod schema for common layer identification
+// Comp: compName (exact match, errors if missing), else compIndex (project item index), else the active comp.
+// Layer: layerIndex (1-based) or layerName.
 const LayerIdentifierSchema = {
-  compIndex: z.number().int().positive().describe("1-based index of the target composition in the project panel."),
-  layerIndex: z.number().int().positive().describe("1-based index of the target layer within the composition.")
+  compName: z.string().optional().describe("Name of the target composition (exact match). Preferred over compIndex."),
+  compIndex: z.number().int().positive().optional().describe("Project item index of the target composition. Used if compName is not given; if neither is given the active comp is used."),
+  layerIndex: z.number().int().positive().optional().describe("1-based index of the target layer within the composition."),
+  layerName: z.string().optional().describe("Name of the target layer. Used if layerIndex is not given.")
 };
 
 // Zod schema for keyframe value (more specific types might be needed depending on property)
@@ -462,7 +490,7 @@ server.tool(
         content: [
           {
             type: "text",
-            text: `Command to set keyframe for "${parameters.propertyName}" on layer ${parameters.layerIndex} in comp ${parameters.compIndex} has been queued.\n` +
+            text: `Command to set keyframe for "${parameters.propertyName}" on layer ${parameters.layerName ?? parameters.layerIndex} in comp ${parameters.compName ?? parameters.compIndex ?? "(active)"} has been queued.\n` +
                   `Use the "get-results" tool after a few seconds to check for confirmation.`
           }
         ]
@@ -488,7 +516,8 @@ server.tool(
   {
     ...LayerIdentifierSchema, // Reuse common identifiers
     propertyName: z.string().describe("Name of the property to apply the expression to (e.g., 'Position', 'Scale', 'Rotation', 'Opacity')."),
-    expressionString: z.string().describe("The JavaScript expression string. Provide an empty string (\"\") to remove the expression.")
+    expressionString: z.string().describe("The JavaScript expression string. Provide an empty string (\"\") to remove the expression."),
+    effectName: z.string().optional().describe("Optional. Name of an effect on the layer. If given, the property is looked up inside that effect only (use when an effect and its parameter share a name, e.g. 'Exposure').")
   },
   async (parameters) => {
     try {
@@ -499,7 +528,7 @@ server.tool(
         content: [
           {
             type: "text",
-            text: `Command to set expression for "${parameters.propertyName}" on layer ${parameters.layerIndex} in comp ${parameters.compIndex} has been queued.\n` +
+            text: `Command to set expression for "${parameters.propertyName}" on layer ${parameters.layerName ?? parameters.layerIndex} in comp ${parameters.compName ?? parameters.compIndex ?? "(active)"} has been queued.\n` +
                   `Use the "get-results" tool after a few seconds to check for confirmation.`
           }
         ]
@@ -641,8 +670,7 @@ server.tool(
   "apply-effect",
   "Apply an effect to a layer in After Effects",
   {
-    compIndex: z.number().int().positive().describe("1-based index of the target composition in the project panel."),
-    layerIndex: z.number().int().positive().describe("1-based index of the target layer within the composition."),
+    ...LayerIdentifierSchema,
     effectName: z.string().optional().describe("Display name of the effect to apply (e.g., 'Gaussian Blur')."),
     effectMatchName: z.string().optional().describe("After Effects internal name for the effect (more reliable, e.g., 'ADBE Gaussian Blur 2')."),
     effectCategory: z.string().optional().describe("Optional category for filtering effects."),
@@ -658,7 +686,7 @@ server.tool(
         content: [
           {
             type: "text",
-            text: `Command to apply effect to layer ${parameters.layerIndex} in composition ${parameters.compIndex} has been queued.\n` +
+            text: `Command to apply effect to layer ${parameters.layerName ?? parameters.layerIndex} in composition ${parameters.compName ?? parameters.compIndex ?? "(active)"} has been queued.\n` +
                   `Use the "get-results" tool after a few seconds to check for confirmation.`
           }
         ]
@@ -682,8 +710,7 @@ server.tool(
   "apply-effect-template",
   "Apply a predefined effect template to a layer in After Effects",
   {
-    compIndex: z.number().int().positive().describe("1-based index of the target composition in the project panel."),
-    layerIndex: z.number().int().positive().describe("1-based index of the target layer within the composition."),
+    ...LayerIdentifierSchema,
     templateName: z.enum([
       "gaussian-blur", 
       "directional-blur", 
@@ -706,7 +733,7 @@ server.tool(
         content: [
           {
             type: "text",
-            text: `Command to apply effect template '${parameters.templateName}' to layer ${parameters.layerIndex} in composition ${parameters.compIndex} has been queued.\n` +
+            text: `Command to apply effect template '${parameters.templateName}' to layer ${parameters.layerName ?? parameters.layerIndex} in composition ${parameters.compName ?? parameters.compIndex ?? "(active)"} has been queued.\n` +
                   `Use the "get-results" tool after a few seconds to check for confirmation.`
           }
         ]
@@ -732,8 +759,7 @@ server.tool(
   "mcp_aftereffects_applyEffect",
   "Apply an effect to a layer in After Effects",
   {
-    compIndex: z.number().int().positive().describe("1-based index of the target composition in the project panel."),
-    layerIndex: z.number().int().positive().describe("1-based index of the target layer within the composition."),
+    ...LayerIdentifierSchema,
     effectName: z.string().optional().describe("Display name of the effect to apply (e.g., 'Gaussian Blur')."),
     effectMatchName: z.string().optional().describe("After Effects internal name for the effect (more reliable, e.g., 'ADBE Gaussian Blur 2')."),
     effectSettings: z.record(z.string(), z.unknown()).optional().describe("Optional parameters for the effect (e.g., { 'Blurriness': 25 }).")
@@ -747,7 +773,7 @@ server.tool(
       await new Promise(resolve => setTimeout(resolve, 1000));
       
       // Get the results
-      const result = readResultsFromTempFile();
+      const result = await readLastResult();
       
       return {
         content: [
@@ -776,8 +802,7 @@ server.tool(
   "mcp_aftereffects_applyEffectTemplate",
   "Apply a predefined effect template to a layer in After Effects",
   {
-    compIndex: z.number().int().positive().describe("1-based index of the target composition in the project panel."),
-    layerIndex: z.number().int().positive().describe("1-based index of the target layer within the composition."),
+    ...LayerIdentifierSchema,
     templateName: z.enum([
       "gaussian-blur", 
       "directional-blur", 
@@ -800,7 +825,7 @@ server.tool(
       await new Promise(resolve => setTimeout(resolve, 1000));
       
       // Get the results
-      const result = readResultsFromTempFile();
+      const result = await readLastResult();
       
       return {
         content: [
@@ -916,10 +941,7 @@ server.tool(
   {},
   async () => {
     try {
-      // Clear any stale result data
-      clearResultsFile();
-      
-      // Write command to file for After Effects to pick up
+      // Queue the command for After Effects to pick up
       writeCommandFile("bridgeTestEffects", {});
       
       return {

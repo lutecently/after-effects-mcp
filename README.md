@@ -209,12 +209,24 @@ You can animate layers with:
 | `setLayerExpression`        | Add/remove expressions from properties|
 | `setLayerProperties`        | Set layer properties (position, scale, rotation, opacity, blendMode, threeDLayer, trackMatteType, enabled, etc.) |
 | `batchSetLayerProperties`  | Apply properties to multiple layers   |
-| `getLayerInfo`              | Get layer info (position, 3D status)  |
+| `getLayerInfo`              | Get layer info by comp/layer name or index (parent, transform values, expressions, keyframe counts, effects, null/3D flags) |
 | `createCamera`              | Create camera layer                   |
 | `createNullObject`          | Create null object for animation      |
+| `createNullLayer`           | Create a null layer (defaults to comp centre) |
 | `duplicateLayer`            | Duplicate a layer                     |
 | `deleteLayer`               | Delete a layer                        |
 | `setLayerMask`              | Create/modify layer masks             |
+| `renameEffect`              | Rename an effect on a layer           |
+| `removeEffect`              | Remove an effect from a layer         |
+| `getKeyframes`              | List keyframes (time, value, interpolation, ease) on a property |
+| `removeKeyframes`           | Remove keyframes by index, time, or all |
+| `getProjectStatus`          | Project name/path, item count, active comp |
+| `saveProject`               | Save, or Save As a path (won't overwrite without `overwrite`) |
+| `openProject` / `newProject`| Replace the open project (`saveCurrent` must be stated) |
+| `undo`                      | Undo the last N bridge commands       |
+| `exportFrame`               | Save one frame of a comp as a PNG (optional time and scale), so the result can be looked at |
+| `getRenderStatus`           | Render queue status and output paths  |
+| `startRender`               | Render the queue (blocks After Effects until done) |
 
 ## 👨‍💻 For Developers
 
@@ -223,6 +235,21 @@ You can animate layers with:
 - `src/index.ts`: MCP server implementation
 - `src/scripts/mcp-bridge-auto.jsx`: Main After Effects panel script
 - `install-bridge.js`: Script to install the panel in After Effects
+
+### 🧪 Testing
+
+`npm run test:bridge -- --run-in-open-project` runs an end-to-end test against a live After Effects. It drives the panel through the queue, so the MCP server does not need to be running. It builds scratch `MCPTEST_*` comps and solids and checks parenting, expressions, keyframes, effects, the safety guards, undo and the queue. It also decodes an exported frame to confirm the rotation really happened, then removes everything it created (add `--keep` to leave the items in place). Run it in a scratch project, with the MCP Bridge Auto panel open. It deliberately does not call `startRender`, so it never renders your queue.
+
+### 🔌 Bridge protocol
+
+The server and the **MCP Bridge Auto** panel talk through `~/Documents/ae-mcp-bridge/`:
+
+- `queue/<timestamp>-<id>.json`: one file per command, `{id, command, args}`. The panel runs them oldest-first and deletes each file when done. Commands waiting more than 10 minutes expire with an error result.
+- `results/<id>.json`: the result for that command (the newest 100 are kept). Results carry `_commandId`, `_commandExecuted` and `_project`.
+- `ae_mcp_result.json`: still written with the latest result, for older clients.
+- `ae_command.json`: the old single-file command path still works, but clients that use it can overwrite each other.
+
+Each server instance only reads results for its own command ids, so several clients (for example two Claude sessions) can share one After Effects safely. `id` may only contain letters, digits, `_` and `-`.
 
 ### 📦 Building the Project
 
