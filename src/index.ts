@@ -35,19 +35,60 @@ function getAETempDir(): string {
 
 // Headless CLI execution has been removed. All interactions are routed through the Bridge panel.
 
-// The bridge stamps every result with the open project (_project). If the project's file changes between results
-// (After Effects restarted, or someone opened another project), add a warning so stale comp/layer assumptions get caught.
+// Fingerprint of the panel script this server ships (same FNV-1a over ASCII characters, ignoring carriage returns, as
+// the panel computes for its own file). A mismatch means the installed panel is not this build.
+let expectedBridgeVersion: string | null | undefined;
+function getExpectedBridgeVersion(): string | null {
+  if (expectedBridgeVersion !== undefined) return expectedBridgeVersion;
+  try {
+    const text = fs.readFileSync(path.join(SCRIPTS_DIR, "mcp-bridge-auto.jsx"), "utf8");
+    let h = 2166136261;
+    for (let i = 0; i < text.length; i++) {
+      const c = text.charCodeAt(i);
+      if (c > 127 || c === 13) continue;
+      h ^= c;
+      h = (h + ((h << 1) + (h << 4) + (h << 7) + (h << 8) + (h << 24))) >>> 0;
+    }
+    expectedBridgeVersion = h.toString(16);
+  } catch {
+    expectedBridgeVersion = null;
+  }
+  return expectedBridgeVersion;
+}
+
+// The bridge stamps every result with the open project (_project) and its own fingerprint (_bridgeVersion). Add a
+// _warning when the project's file changes between results (After Effects restarted, or someone opened another project)
+// so stale comp/layer assumptions get caught, and when the installed panel is not the build this server ships.
 let lastProjectKey: string | null = null;
+let lastWarnedPanelVersion: string | null = null;
 function annotateProjectChange(content: string): string {
   try {
     const parsed = JSON.parse(content);
-    const project = parsed && parsed._project;
-    if (!project) return content;
-    const key = `${project.path ?? "(unsaved)"}`;
-    if (lastProjectKey !== null && key !== lastProjectKey) {
-      parsed._warning = `The open After Effects project changed since the last result (was ${lastProjectKey}, now ${key}). Comps and layers created earlier may not exist; re-check with getProjectStatus / listCompositions.`;
+    if (!parsed || typeof parsed !== "object") return content;
+    const warnings: string[] = [];
+
+    const project = parsed._project;
+    if (project) {
+      const key = `${project.path ?? "(unsaved)"}`;
+      if (lastProjectKey !== null && key !== lastProjectKey) {
+        warnings.push(`The open After Effects project changed since the last result (was ${lastProjectKey}, now ${key}). Comps and layers created earlier may not exist; re-check with getProjectStatus / listCompositions.`);
+      }
+      lastProjectKey = key;
     }
-    lastProjectKey = key;
+
+    const expected = getExpectedBridgeVersion();
+    if (expected !== null) {
+      const panel: string | null = typeof parsed._bridgeVersion === "string" ? parsed._bridgeVersion : null;
+      const panelLabel = panel ?? "none (older than the version check)";
+      if (panel !== "unknown" && panel !== expected && panelLabel !== lastWarnedPanelVersion) {
+        warnings.push(`The After Effects panel is not the build this server ships (panel ${panelLabel}, server ${expected}). Commands may be missing or behave differently. Copy build/scripts/mcp-bridge-auto.jsx over the installed panel script, reopen the panel, and restart this server.`);
+        lastWarnedPanelVersion = panelLabel;
+      }
+      if (panel === expected) lastWarnedPanelVersion = null;
+    }
+
+    if (warnings.length === 0) return content;
+    parsed._warning = warnings.join(" ");
     return JSON.stringify(parsed, null, 2);
   } catch {
     return content;
@@ -147,76 +188,14 @@ server.tool(
     parameters: z.record(z.string(), z.unknown()).optional().describe("Optional parameters for the script")
   },
   async ({ script, parameters = {} }) => {
-    // Validate that script is safe (only allow predefined scripts)
-    const allowedScripts = [
-      "listCompositions", 
-      "getProjectInfo", 
-      "getLayerInfo", 
-      "createComposition",
-      "createTextLayer",
-      "createShapeLayer",
-      "createSolidLayer",
-      "setLayerProperties",
-      "setLayerKeyframe",
-      "setLayerExpression",
-      "applyEffect",
-      "applyEffectTemplate",
-      "test-animation",
-      "bridgeTestEffects",
-      "createCamera",
-      "batchSetLayerProperties",
-      "setCompositionProperties",
-      "duplicateLayer",
-      "deleteLayer",
-      "setLayerMask",
-      "precomposeLayers",
-      "addCompToComp",
-      "setGuideLayer",
-      "setLayerParent",
-      "createNullLayer",
-      "moveLayer",
-      "importFile",
-      "setEffectProperty",
-      "renameEffect",
-      "removeEffect",
-      "getKeyframes",
-      "removeKeyframes",
-      "getProjectStatus",
-      "saveProject",
-      "openProject",
-      "newProject",
-      "undo",
-      "getRenderStatus",
-      "exportFrame",
-      "deleteProjectItems",
-      "setLayerTiming",
-      "splitLayer",
-      "setAnchorPoint",
-      "setLayerFlags",
-      "renameLayer",
-      "addMarker",
-      "getMarkers",
-      "removeMarkers",
-      "listLayerProperties",
-      "setProperty",
-      "addShapeContent",
-      "setTextDocument",
-      "getProjectTree",
-      "createFolder",
-      "moveProjectItems",
-      "setProjectItemProperties",
-      "openComp",
-      "replaceLayerSource",
-      "startRender",
-      "addToRenderQueue"
-    ];
-    
-    if (!allowedScripts.includes(script)) {
+    // The panel's command table is the one list of commands; it rejects any name it does not have (and says which
+    // exist). Here only make sure the name is a plain identifier, since it is written into the queue.
+    if (!/^[A-Za-z][A-Za-z0-9_-]{0,63}$/.test(script)) {
       return {
         content: [
           {
             type: "text",
-            text: `Error: Script "${script}" is not allowed. Allowed scripts are: ${allowedScripts.join(", ")}`
+            text: `Error: "${script}" is not a valid command name. Use getCapabilities to list the commands the panel supports.`
           }
         ],
         isError: true
@@ -419,6 +398,17 @@ Layer/comp management scripts (run via run-script; comps are found by compName, 
 - setProjectItemProperties: {itemId|itemName, newName?, label? (0-16), comment?}
 - openComp: {compName}. Opens the comp in the Composition panel
 - replaceLayerSource: {compName?, layerIndex|layerName, sourceItemName|sourceItemId, fixExpressions?}
+- getCapabilities: {}. The panel's bridge version, After Effects version, and every command it supports. Every result also carries _bridgeVersion, and get-results warns if the installed panel is not the build this server ships
+- setKeyframeEase: {compName?, layerIndex|layerName, propertyPath | propertyName (+effectName?), all | keyIndices | time, preset (easyEase|easyEaseIn|easyEaseOut|linear|hold|bezier), inSpeed?, inInfluence?, outSpeed?, outInfluence?}. "bezier" takes custom speeds and influences (0.1-100)
+- offsetKeyframes: {compName?, layerIndex|layerName, propertyPath | propertyName (+effectName?), by (seconds), all | keyIndices | time}. Moves keyframes, keeping their values and ease
+- copyKeyframes: {from: {compName?, layerIndex|layerName, propertyName|propertyPath, effectName?}, to: {same}, timeOffset?, clear?}. Copies every keyframe with value, interpolation and ease
+- getSelection: {}. The active comp (playhead, work area), selected layers, selected properties (with paths and selected keys) and selected Project panel items
+- setSelection: {compName?, layerIndices [..] | layerNames [..], additive?, clear?}
+- setCurrentTime: {compName?, time (seconds) | frame}. Moves the playhead
+- setWorkArea: {compName?, start?, duration? | end?}
+- listEffects: {query?, category?, limit?}. Finds effect display names and match names, so applyEffect does not need guessing
+- listFonts: {query?, limit?}. Finds PostScript font names for setTextDocument (After Effects 24 or later)
+- listRenderTemplates: {}. Render settings and output module templates, for addToRenderQueue
 - deleteProjectItems: {namePrefix (min 4 chars), dryRun?, includeFolders?}. Removes comps/footage/solids whose names start with the prefix (and every layer using them). Folders are kept unless includeFolders is true (then only emptied ones go). For cleaning up scratch items
 - exportFrame: {compName? (default: active comp), time? (seconds, default: comp time), outputPath? (.png; default: ~/Documents/ae-mcp-bridge/frames/), overwrite?, scale? (1 full size, 2 half, 4 quarter)}. Saves one frame as a PNG and returns its path, so you can open the image and check the result
 - getRenderStatus: {}. Render queue items, status and output paths

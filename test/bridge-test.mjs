@@ -78,6 +78,20 @@ async function run(command, commandArgs = {}) {
   return result;
 }
 
+// Same fingerprint the panel computes for its own file (FNV-1a over ASCII characters, ignoring carriage returns)
+function bridgeFingerprint(file) {
+  const text = fs.readFileSync(file, "utf8");
+  let h = 2166136261;
+  for (let i = 0; i < text.length; i++) {
+    const c = text.charCodeAt(i);
+    if (c > 127 || c === 13) continue;
+    h ^= c;
+    h = (h + ((h << 1) + (h << 4) + (h << 7) + (h << 8) + (h << 24))) >>> 0;
+  }
+  return h.toString(16);
+}
+const BUILT_PANEL = path.join(path.dirname(new URL(import.meta.url).pathname), "..", "build", "scripts", "mcp-bridge-auto.jsx");
+
 const isOk = (r) => r && (r.status === "success" || r.success === true);
 const isError = (r) => r && (r.status === "error" || r.success === false || typeof r.error === "string");
 
@@ -146,8 +160,18 @@ async function main() {
 
   const MAIN = `${PREFIX}main`, PRE = `${PREFIX}pre`;
   try {
+    console.log("\nBridge handshake");
+    let r = await run("getCapabilities");
+    check("getCapabilities lists the commands", isOk(r) && Array.isArray(r.commands) && r.commands.includes("getCapabilities") && r.commands.includes("setKeyframeEase") && r.commands.length > 60, `${(r.commands || []).length} commands`);
+    if (fs.existsSync(BUILT_PANEL)) {
+      check("the installed panel is the build in build/scripts (reinstall it if not)", r.bridgeVersion === bridgeFingerprint(BUILT_PANEL), `panel ${r.bridgeVersion}, build ${bridgeFingerprint(BUILT_PANEL)}`);
+    }
+    check("results carry the bridge version", r._bridgeVersion === r.bridgeVersion);
+    r = await run("definitelyNotACommand");
+    check("an unknown command is rejected with the list of real ones", isError(r) && Array.isArray(r.availableCommands) && r.availableCommands.includes("getCapabilities"), JSON.stringify(r).slice(0, 120));
+
     console.log("\nScene setup");
-    let r = await run("createComposition", { name: MAIN, width: 1080, height: 1920, duration: 5, frameRate: 30 });
+    r = await run("createComposition", { name: MAIN, width: 1080, height: 1920, duration: 5, frameRate: 30 });
     check("createComposition", isOk(r), r.message);
 
     r = await run("createSolidLayer", { compName: MAIN, name: `${PREFIX}red`, color: [1, 0.2, 0.2], size: [400, 400], position: [540, 600], duration: 5 });
@@ -329,6 +353,79 @@ async function main() {
     check("setTextDocument", isOk(r) && r.text.text === `${PREFIX}changed` && near(r.text.fontSize, 77, 0.01) && near(r.text.tracking, 50, 0.01) && nearVec(r.text.fillColor, [0, 0, 1], 0.01), JSON.stringify(r.text));
     r = await run("setTextDocument", { compName: MAIN, layerName: `${PREFIX}shape`, text: "nope" });
     check("setTextDocument refuses a non-text layer", isError(r), r.message);
+
+    console.log("\nKeyframe easing, offset and copy");
+    const TOOL = `${PREFIX}tool_renamed`, SHAPE = `${PREFIX}shape`;
+    for (const [t, v] of [[0, 100], [1, 20]]) {
+      r = await run("setLayerKeyframe", { compName: MAIN, layerName: TOOL, propertyName: "Opacity", timeInSeconds: t, value: v });
+      check(`setLayerKeyframe ${t}s`, isOk(r), r.message);
+    }
+    r = await run("setKeyframeEase", { compName: MAIN, layerName: TOOL, propertyName: "Opacity", all: true, preset: "easyEase" });
+    check("setKeyframeEase easyEase gives speed 0 and influence 33 on both sides", isOk(r) && r.keyframes.length === 2 && r.keyframes.every((k) => k.inInterpolation === "bezier" && k.outInterpolation === "bezier" && near(k.inEase[0].influence, 33.33, 0.1) && near(k.outEase[0].speed, 0, 0.001)), JSON.stringify(r.keyframes));
+    r = await run("setKeyframeEase", { compName: MAIN, layerName: TOOL, propertyName: "Opacity", keyIndices: [1], preset: "hold" });
+    check("setKeyframeEase hold", isOk(r) && r.keyframes[0].outInterpolation === "hold", JSON.stringify(r.keyframes));
+    r = await run("setKeyframeEase", { compName: MAIN, layerName: TOOL, propertyName: "Opacity", keyIndices: [2], preset: "bezier", inSpeed: 0, inInfluence: 80, outSpeed: 0, outInfluence: 10 });
+    check("setKeyframeEase bezier takes custom influences", isOk(r) && near(r.keyframes[0].inEase[0].influence, 80, 0.5) && near(r.keyframes[0].outEase[0].influence, 10, 0.5), JSON.stringify(r.keyframes));
+    r = await run("setKeyframeEase", { compName: MAIN, layerName: TOOL, propertyName: "Opacity", all: true, preset: "banana" });
+    check("setKeyframeEase rejects an unknown preset", isError(r), r.message);
+    r = await run("setKeyframeEase", { compName: MAIN, layerName: TOOL, propertyName: "Opacity", preset: "linear" });
+    check("setKeyframeEase needs to be told which keyframes", isError(r), r.message);
+    r = await run("setKeyframeEase", { compName: MAIN, layerName: TOOL, propertyName: "Opacity", keyIndices: [9], preset: "linear" });
+    check("setKeyframeEase rejects a keyframe index that does not exist", isError(r), r.message);
+
+    r = await run("offsetKeyframes", { compName: MAIN, layerName: TOOL, propertyName: "Opacity", by: 0.5, all: true });
+    check("offsetKeyframes moves the keys", isOk(r) && near(r.property.keyTimes[0], 0.5, 0.01) && near(r.property.keyTimes[1], 1.5, 0.01), JSON.stringify(r.property));
+    r = await run("getKeyframes", { compName: MAIN, layerName: TOOL, propertyName: "Opacity" });
+    check("...keeping values, hold and custom ease", r.keyframes.length === 2 && r.keyframes[0].value === 100 && r.keyframes[1].value === 20 && r.keyframes[0].outInterpolation === "hold" && near(r.keyframes[1].inEase[0].influence, 80, 0.5), JSON.stringify(r.keyframes));
+    r = await run("offsetKeyframes", { compName: MAIN, layerName: TOOL, propertyName: "Opacity", by: -2, all: true });
+    check("offsetKeyframes refuses to go before time 0", isError(r), r.message);
+
+    r = await run("copyKeyframes", { from: { compName: MAIN, layerName: TOOL, propertyName: "Opacity" }, to: { compName: MAIN, layerName: SHAPE, propertyName: "Opacity" }, timeOffset: 1 });
+    check("copyKeyframes copies to another layer", isOk(r) && r.to.numKeyframes === 2, JSON.stringify(r));
+    r = await run("getKeyframes", { compName: MAIN, layerName: SHAPE, propertyName: "Opacity" });
+    check("...shifted by the offset, with value and hold kept", r.keyframes.length === 2 && near(r.keyframes[0].time, 1.5, 0.01) && near(r.keyframes[1].time, 2.5, 0.01) && r.keyframes[0].value === 100 && r.keyframes[0].outInterpolation === "hold", JSON.stringify(r.keyframes));
+    r = await run("copyKeyframes", { from: { compName: MAIN, layerName: TOOL, propertyName: "Opacity" }, to: { compName: MAIN, layerName: SHAPE, propertyName: "Position" } });
+    check("copyKeyframes refuses different kinds of property", isError(r) && /different kinds/.test(r.message || ""), r.message);
+    r = await run("copyKeyframes", { from: { compName: MAIN, layerName: SHAPE, propertyName: "Scale" }, to: { compName: MAIN, layerName: TOOL, propertyName: "Scale" } });
+    check("copyKeyframes errors when the source has no keyframes", isError(r), r.message);
+    for (const name of [TOOL, SHAPE]) {
+      r = await run("removeKeyframes", { compName: MAIN, layerName: name, propertyName: "Opacity", all: true });
+      check(`removeKeyframes all (${name})`, isOk(r) && r.property.keyframesAfter === 0, r.message);
+    }
+
+    console.log("\nContext and discovery");
+    r = await run("openComp", { compName: MAIN });
+    check("openComp for the context tests", isOk(r), r.message);
+    r = await run("setSelection", { compName: MAIN, layerNames: [TOOL] });
+    check("setSelection selects a layer", isOk(r) && r.selectedLayers.length === 1 && r.selectedLayers[0].name === TOOL, JSON.stringify(r.selectedLayers));
+    r = await run("setCurrentTime", { compName: MAIN, time: 1.5 });
+    check("setCurrentTime moves the playhead", isOk(r) && near(r.time, 1.5, 0.001), JSON.stringify(r));
+    r = await run("getSelection");
+    check("getSelection reports the comp, playhead and selected layer", isOk(r) && r.activeComp?.name === MAIN && near(r.activeComp.time, 1.5, 0.001) && r.selectedLayers.some((l) => l.name === TOOL), JSON.stringify({ comp: r.activeComp?.name, time: r.activeComp?.time, layers: r.selectedLayers }));
+    r = await run("setSelection", { compName: MAIN, clear: true });
+    check("setSelection clear deselects everything", isOk(r) && r.selectedLayers.length === 0, JSON.stringify(r.selectedLayers));
+    r = await run("setSelection", { compName: MAIN });
+    check("setSelection with nothing to select errors", isError(r), r.message);
+    r = await run("setCurrentTime", { compName: MAIN, time: 99 });
+    check("setCurrentTime refuses a time outside the comp", isError(r), r.message);
+    r = await run("setWorkArea", { compName: MAIN, start: 1, duration: 2 });
+    check("setWorkArea", isOk(r) && near(r.workAreaStart, 1, 0.01) && near(r.workAreaEnd, 3, 0.01), JSON.stringify(r));
+    r = await run("setWorkArea", { compName: MAIN, start: 4, duration: 5 });
+    check("setWorkArea refuses to run past the end of the comp", isError(r), r.message);
+    r = await run("setWorkArea", { compName: MAIN, start: 0, duration: 5 });
+    check("setWorkArea restored to the whole comp", isOk(r) && near(r.workAreaStart, 0, 0.01) && near(r.workAreaDuration, 5, 0.01), JSON.stringify(r));
+
+    r = await run("listEffects", { query: "Gaussian Blur" });
+    check("listEffects finds Gaussian Blur and its match name", isOk(r) && r.effects.some((e) => e.matchName === "ADBE Gaussian Blur 2"), JSON.stringify(r.effects?.slice(0, 3)));
+    r = await run("listEffects", { query: "zzzz-no-such-effect" });
+    check("listEffects with no match returns none", isOk(r) && r.total === 0);
+    r = await run("listFonts", { query: "Arial" });
+    check("listFonts (or says it needs a newer After Effects)", (isOk(r) && r.total > 0 && !!r.fonts[0].postScriptName) || (isError(r) && /24/.test(r.message || "")), r.message || JSON.stringify(r.fonts?.slice(0, 2)));
+    const before = await run("getRenderStatus");
+    r = await run("listRenderTemplates");
+    check("listRenderTemplates", isOk(r) && r.renderSettingsTemplates.length > 0 && r.outputModuleTemplates.length > 0, JSON.stringify(r).slice(0, 160));
+    const after = await run("getRenderStatus");
+    check("...and left the render queue as it found it", before.numItems === after.numItems, `${before.numItems} -> ${after.numItems}`);
 
     console.log("\nProject panel");
     const FOLDER = `${PREFIX}folder`, CHILD = `${PREFIX}child`, ALT = `${PREFIX}alt`;
