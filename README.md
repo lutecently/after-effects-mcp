@@ -209,12 +209,14 @@ You can animate layers with:
 | `setLayerExpression`        | Add/remove expressions from properties|
 | `setLayerProperties`        | Set layer properties (position, scale, rotation, opacity, blendMode, threeDLayer, trackMatteType, enabled, etc.) |
 | `batchSetLayerProperties`  | Apply properties to multiple layers   |
-| `getLayerInfo`              | Get layer info (position, 3D status)  |
+| `getLayerInfo`              | Get layer info by comp/layer name or index (parent, transform values, expressions, keyframe counts, effects, null/3D flags) |
 | `createCamera`              | Create camera layer                   |
 | `createNullObject`          | Create null object for animation      |
+| `createNullLayer`           | Create a null layer (defaults to comp centre) |
 | `duplicateLayer`            | Duplicate a layer                     |
 | `deleteLayer`               | Delete a layer                        |
 | `setLayerMask`              | Create/modify layer masks             |
+| `renameEffect`              | Rename an effect on a layer           |
 
 ## 👨‍💻 For Developers
 

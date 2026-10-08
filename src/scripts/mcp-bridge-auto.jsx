@@ -750,17 +750,13 @@ function batchSetLayerProperties(args) {
  * @param {any} value - The value for the keyframe (e.g., [x, y] for Position, [w, h] for Scale, angle for Rotation, percentage for Opacity).
  * @returns {string} JSON string indicating success or error.
  */
-function setLayerKeyframe(compIndex, layerIndex, propertyName, timeInSeconds, value) {
+function setLayerKeyframe(args) {
     try {
-        // Use 1-based indices as per After Effects API
-        var comp = app.project.items[compIndex];
-        if (!comp || !(comp instanceof CompItem)) {
-            return JSON.stringify({ success: false, message: "Composition not found at index " + compIndex });
-        }
-        var layer = comp.layers[layerIndex];
-        if (!layer) {
-            return JSON.stringify({ success: false, message: "Layer not found at index " + layerIndex + " in composition '" + comp.name + "'"});
-        }
+        var propertyName = args.propertyName, timeInSeconds = args.timeInSeconds, value = args.value;
+        var target;
+        try { target = resolveTarget(args); }
+        catch (e) { return JSON.stringify({ success: false, message: e.message }); }
+        var comp = target.comp, layer = target.layer;
 
         var transformGroup = layer.property("Transform");
         if (!transformGroup) {
@@ -811,17 +807,13 @@ function setLayerKeyframe(compIndex, layerIndex, propertyName, timeInSeconds, va
  * @param {string} [effectName] - Optional. If given, only look for the property inside this effect.
  * @returns {string} JSON string indicating success or error.
  */
-function setLayerExpression(compIndex, layerIndex, propertyName, expressionString, effectName) {
+function setLayerExpression(args) {
     try {
-         // Adjust indices to be 0-based for ExtendScript arrays
-        var comp = app.project.items[compIndex];
-         if (!comp || !(comp instanceof CompItem)) {
-            return JSON.stringify({ success: false, message: "Composition not found at index " + compIndex });
-        }
-        var layer = comp.layers[layerIndex];
-         if (!layer) {
-            return JSON.stringify({ success: false, message: "Layer not found at index " + layerIndex + " in composition '" + comp.name + "'"});
-        }
+        var propertyName = args.propertyName, expressionString = args.expressionString, effectName = args.effectName;
+        var target;
+        try { target = resolveTarget(args); }
+        catch (e) { return JSON.stringify({ success: false, message: e.message }); }
+        var comp = target.comp, layer = target.layer;
 
         var transformGroup = layer.property("Transform");
          if (!transformGroup) {
@@ -884,8 +876,7 @@ function setLayerExpression(compIndex, layerIndex, propertyName, expressionStrin
 function applyEffect(args) {
     try {
         // Extract parameters
-        var compIndex = args.compIndex || 1; // Default to first comp
-        var layerIndex = args.layerIndex || 1; // Default to first layer
+        var compIndex = args.compIndex;
         var effectName = args.effectName; // Name of the effect to apply
         var effectMatchName = args.effectMatchName; // After Effects internal name (more reliable)
         var effectCategory = args.effectCategory || ""; // Optional category for filtering
@@ -896,17 +887,10 @@ function applyEffect(args) {
             throw new Error("You must specify either effectName, effectMatchName, or presetPath");
         }
         
-        // Find the composition by index
-        var comp = app.project.item(compIndex);
-        if (!comp || !(comp instanceof CompItem)) {
-            throw new Error("Composition not found at index " + compIndex);
-        }
-        
-        // Find the layer by index
-        var layer = comp.layer(layerIndex);
-        if (!layer) {
-            throw new Error("Layer not found at index " + layerIndex + " in composition '" + comp.name + "'");
-        }
+        // Find the comp (compName, compIndex or active comp) and the layer (layerIndex or layerName)
+        var target = resolveTarget(args);
+        var comp = target.comp;
+        var layer = target.layer;
         
         var effectResult;
         
@@ -959,7 +943,7 @@ function applyEffect(args) {
             effect: effectResult,
             layer: {
                 name: layer.name,
-                index: layerIndex
+                index: layer.index
             },
             composition: {
                 name: comp.name,
@@ -1019,8 +1003,7 @@ function applyEffectSettings(effect, settings) {
 function applyEffectTemplate(args) {
     try {
         // Extract parameters
-        var compIndex = args.compIndex || 1; // Default to first comp
-        var layerIndex = args.layerIndex || 1; // Default to first layer
+        var compIndex = args.compIndex;
         var templateName = args.templateName; // Name of the template to apply
         var customSettings = args.customSettings || {}; // Optional customizations
         
@@ -1028,17 +1011,10 @@ function applyEffectTemplate(args) {
             throw new Error("You must specify a templateName");
         }
         
-        // Find the composition by index
-        var comp = app.project.item(compIndex);
-        if (!comp || !(comp instanceof CompItem)) {
-            throw new Error("Composition not found at index " + compIndex);
-        }
-        
-        // Find the layer by index
-        var layer = comp.layer(layerIndex);
-        if (!layer) {
-            throw new Error("Layer not found at index " + layerIndex + " in composition '" + comp.name + "'");
-        }
+        // Find the comp (compName, compIndex or active comp) and the layer (layerIndex or layerName)
+        var target = resolveTarget(args);
+        var comp = target.comp;
+        var layer = target.layer;
         
         // Template definitions
         var templates = {
@@ -1199,7 +1175,7 @@ function applyEffectTemplate(args) {
             appliedEffects: appliedEffects,
             layer: {
                 name: layer.name,
-                index: layerIndex
+                index: layer.index
             },
             composition: {
                 name: comp.name,
@@ -1237,6 +1213,26 @@ function findCompByNameStrict(compName) {
         if (item instanceof CompItem && item.name === compName) { return item; }
     }
     throw new Error("Composition not found: '" + compName + "'");
+}
+
+// Resolve the comp and layer a command targets. The comp is chosen by compName (exact, strict), else compIndex
+// (project item index), else the active comp. The layer is chosen by layerIndex or layerName.
+// Throws if a named/indexed comp does not exist, instead of silently falling back to the active comp.
+function resolveTarget(args, needLayer) {
+    var comp = null;
+    if (args.compName) {
+        comp = findCompByNameStrict(args.compName);
+    } else if (args.compIndex !== undefined && args.compIndex !== null) {
+        comp = app.project.item(args.compIndex);
+        if (!comp || !(comp instanceof CompItem)) { throw new Error("Composition not found at project item index " + args.compIndex); }
+    } else if (app.project.activeItem instanceof CompItem) {
+        comp = app.project.activeItem;
+    } else {
+        throw new Error("No compName/compIndex given and no active composition");
+    }
+    var layer = null;
+    if (needLayer !== false) { layer = resolveLayer(comp, args.layerIndex, args.layerName || ""); }
+    return { comp: comp, layer: layer };
 }
 
 // Find a layer by index or name. Throws if it cannot be found.
@@ -1301,6 +1297,23 @@ function findPropertyInAnyEffect(layer, name) {
 // Read a property value without letting an odd value type break the JSON result.
 function safePropertyValue(prop) {
     try { return prop.value; } catch (e) { return null; }
+}
+
+// --- createNullLayer: add a null object (defaults to comp centre) ---
+function createNullLayer(args) {
+    try {
+        var comp = resolveComp(args.compName || "");
+        var nullLayer = comp.layers.addNull(args.duration || comp.duration);
+        nullLayer.name = args.name || "Null";
+        var pos = args.position || [comp.width / 2, comp.height / 2];
+        nullLayer.property("Position").setValue(pos);
+        return JSON.stringify({
+            status: "success", message: "Null layer created successfully",
+            layer: { name: nullLayer.name, index: nullLayer.index, position: pos }
+        }, null, 2);
+    } catch (error) {
+        return JSON.stringify({ status: "error", message: error.toString() }, null, 2);
+    }
 }
 
 // --- precomposeLayers: precompose layers into a new comp ---
@@ -1512,6 +1525,33 @@ function importFile(args) {
             item: { name: item.name, id: item.id },
             folder: folderInfo,
             layer: layerInfo
+        }, null, 2);
+    } catch (error) {
+        return JSON.stringify({ status: "error", message: error.toString() }, null, 2);
+    }
+}
+
+// --- renameEffect: rename an effect on a layer ---
+function renameEffect(args) {
+    try {
+        var comp = resolveComp(args.compName || "");
+        var layer = resolveLayer(comp, args.layerIndex, args.layerName || "");
+        if (!args.newName) { throw new Error("newName is required"); }
+
+        var effectRef = null;
+        if (args.effectIndex !== undefined && args.effectIndex !== null) { effectRef = args.effectIndex; }
+        else if (args.effectName) { effectRef = args.effectName; }
+        else { throw new Error("Provide effectName or effectIndex"); }
+
+        var effect = findEffectOnLayer(layer, effectRef);
+        if (!effect) { throw new Error("Effect not found on layer '" + layer.name + "': " + effectRef); }
+
+        var oldName = effect.name;
+        effect.name = args.newName;
+        return JSON.stringify({
+            status: "success", message: "Effect renamed successfully",
+            effect: { oldName: oldName, name: effect.name, matchName: effect.matchName, index: effect.propertyIndex },
+            layer: { name: layer.name, index: layer.index }
         }, null, 2);
     } catch (error) {
         return JSON.stringify({ status: "error", message: error.toString() }, null, 2);
@@ -1864,38 +1904,69 @@ function listCompositions() {
     return JSON.stringify(result, null, 2);
 }
 
-function getLayerInfo() {
-    var project = app.project;
-    var result = {
-        layers: []
-    };
-    
-    // Get the active composition
-    var activeComp = null;
-    if (app.project.activeItem instanceof CompItem) {
-        activeComp = app.project.activeItem;
-    } else {
-        return JSON.stringify({ error: "No active composition" }, null, 2);
+// Read a transform-style property into {value, expression?, numKeyframes}. Returns null if the layer lacks it.
+function describeProperty(layer, group, matchName) {
+    try {
+        var prop = layer.property(group).property(matchName);
+        if (!prop) { return null; }
+        var info = { value: safePropertyValue(prop), numKeyframes: prop.numKeys || 0 };
+        if (prop.expressionEnabled) { info.expression = prop.expression; }
+        return info;
+    } catch (e) { return null; }
+}
+
+// getLayerInfo: {compName? | compIndex? (default: active comp), layerIndex? | layerName? (default: all layers)}
+function getLayerInfo(args) {
+    try {
+        args = args || {};
+        var hasLayer = (args.layerIndex !== undefined && args.layerIndex !== null) || !!args.layerName;
+        var comp = resolveTarget(args, false).comp;
+        var layers = [];
+        if (hasLayer) { layers.push(resolveLayer(comp, args.layerIndex, args.layerName || "")); }
+        else { for (var i = 1; i <= comp.numLayers; i++) { layers.push(comp.layer(i)); } }
+
+        var result = { composition: { name: comp.name, id: comp.id, width: comp.width, height: comp.height, duration: comp.duration, frameRate: comp.frameRate }, layers: [] };
+        for (var j = 0; j < layers.length; j++) {
+            var layer = layers[j];
+            var info = {
+                index: layer.index,
+                name: layer.name,
+                enabled: layer.enabled,
+                locked: layer.locked,
+                shy: layer.shy,
+                solo: layer.solo,
+                label: layer.label,
+                threeDLayer: layer.threeDLayer,
+                isNull: !!layer.nullLayer,
+                guideLayer: !!layer.guideLayer,
+                inPoint: layer.inPoint,
+                outPoint: layer.outPoint,
+                startTime: layer.startTime,
+                position: safePropertyValue(layer.property("Position")),
+                parent: layer.parent ? { index: layer.parent.index, name: layer.parent.name } : null
+            };
+            if (layer.source) { info.source = { name: layer.source.name, isComp: layer.source instanceof CompItem }; }
+            info.transform = {
+                anchorPoint: describeProperty(layer, "Transform", "Anchor Point"),
+                position: describeProperty(layer, "Transform", "Position"),
+                scale: describeProperty(layer, "Transform", "Scale"),
+                rotation: describeProperty(layer, "Transform", layer.threeDLayer ? "Z Rotation" : "Rotation"),
+                opacity: describeProperty(layer, "Transform", "Opacity")
+            };
+            info.effects = [];
+            var effects = layer.property("ADBE Effect Parade");
+            if (effects) {
+                for (var k = 1; k <= effects.numProperties; k++) {
+                    var eff = effects.property(k);
+                    info.effects.push({ index: k, name: eff.name, matchName: eff.matchName, enabled: eff.enabled });
+                }
+            }
+            result.layers.push(info);
+        }
+        return JSON.stringify(result, null, 2);
+    } catch (error) {
+        return JSON.stringify({ status: "error", message: error.toString() }, null, 2);
     }
-    
-    // Loop through layers in the active composition
-    for (var i = 1; i <= activeComp.numLayers; i++) {
-        var layer = activeComp.layer(i);
-        var layerInfo = {
-            index: layer.index,
-            name: layer.name,
-            enabled: layer.enabled,
-            locked: layer.locked,
-            threeDLayer: layer.threeDLayer,
-            position: layer.property("Position").value,
-            inPoint: layer.inPoint,
-            outPoint: layer.outPoint
-        };
-        
-        result.layers.push(layerInfo);
-    }
-    
-    return JSON.stringify(result, null, 2);
 }
 
 // Execute command
@@ -1917,7 +1988,7 @@ function executeCommand(command, args) {
                 result = listCompositions();
                 break;
             case "getLayerInfo":
-                result = getLayerInfo();
+                result = getLayerInfo(args);
                 break;
             case "createComposition":
                 logToPanel("Calling createComposition function...");
@@ -1946,12 +2017,12 @@ function executeCommand(command, args) {
                 break;
             case "setLayerKeyframe":
                 logToPanel("Calling setLayerKeyframe function...");
-                result = setLayerKeyframe(args.compIndex, args.layerIndex, args.propertyName, args.timeInSeconds, args.value);
+                result = setLayerKeyframe(args);
                 logToPanel("Returned from setLayerKeyframe.");
                 break;
             case "setLayerExpression":
                 logToPanel("Calling setLayerExpression function...");
-                result = setLayerExpression(args.compIndex, args.layerIndex, args.propertyName, args.expressionString, args.effectName);
+                result = setLayerExpression(args);
                 logToPanel("Returned from setLayerExpression.");
                 break;
             case "applyEffect":
@@ -2014,6 +2085,11 @@ function executeCommand(command, args) {
                 result = setGuideLayer(args);
                 logToPanel("Returned from setGuideLayer.");
                 break;
+            case "createNullLayer":
+                logToPanel("Calling createNullLayer function...");
+                result = createNullLayer(args);
+                logToPanel("Returned from createNullLayer.");
+                break;
             case "setLayerParent":
                 logToPanel("Calling setLayerParent function...");
                 result = setLayerParent(args);
@@ -2028,6 +2104,11 @@ function executeCommand(command, args) {
                 logToPanel("Calling importFile function...");
                 result = importFile(args);
                 logToPanel("Returned from importFile.");
+                break;
+            case "renameEffect":
+                logToPanel("Calling renameEffect function...");
+                result = renameEffect(args);
+                logToPanel("Returned from renameEffect.");
                 break;
             case "setEffectProperty":
                 logToPanel("Calling setEffectProperty function...");

@@ -195,9 +195,11 @@ server.tool(
       "addCompToComp",
       "setGuideLayer",
       "setLayerParent",
+      "createNullLayer",
       "moveLayer",
       "importFile",
       "setEffectProperty",
+      "renameEffect",
       "addToRenderQueue"
     ];
     
@@ -364,7 +366,7 @@ To use this integration with After Effects, follow these steps:
 Available scripts:
 - getProjectInfo: Information about the current project
 - listCompositions: List all compositions in the project
-- getLayerInfo: Information about layers in the active composition
+- getLayerInfo: {compName|compIndex? (default: active comp), layerIndex|layerName? (default: all layers)}. Returns parent, transform (value, expression, keyframe count), effects, null/3D flags and source for each layer
 - createComposition: Create a new composition
 - createTextLayer: Create a new text layer
 - createShapeLayer: Create a new shape layer
@@ -375,14 +377,18 @@ Available scripts:
 - applyEffect: Apply an effect to a layer
 - applyEffectTemplate: Apply a predefined effect template to a layer
 
+setLayerKeyframe, setLayerExpression, applyEffect and applyEffectTemplate target by compName|compIndex (or the active comp) and layerIndex|layerName.
+
 Layer/comp management scripts (run via run-script; comps are found by compName, layers by layerIndex or layerName):
 - precomposeLayers: {compName, layerIndices[] or layerNames[], newCompName, moveAllAttributes (default true)}
 - addCompToComp: {compName (target), sourceCompName, opacity?, position?}
 - setGuideLayer: {compName, layerIndex|layerName, guideLayer (default true)}
+- createNullLayer: {compName, name?, position? (default comp centre), duration?}
 - setLayerParent: {compName, layerIndex|layerName, parentLayerIndex|parentLayerName, keepTransform?} or {..., clearParent: true}
 - moveLayer: {compName, layerIndex|layerName} plus ONE of: moveTo ("top"|"bottom"), toIndex, aboveLayerIndex|aboveLayerName, belowLayerIndex|belowLayerName
 - importFile: {filePath (absolute), folderName? (created if missing), addToComp? (true adds to compName or the active comp)}
 - setEffectProperty: {compName, layerIndex|layerName, effectName|effectIndex, propertyName, value}. Searches inside that effect only.
+- renameEffect: {compName, layerIndex|layerName, effectName|effectIndex, newName}. Expressions referencing the old name must be updated.
 - addToRenderQueue: {compName, outputModuleTemplate?, outputPath?}. Queues only; does not start rendering.
 - setLayerExpression also accepts an optional effectName to look for the property inside that effect only.
 
@@ -453,9 +459,13 @@ server.tool(
 // --- BEGIN NEW TOOLS --- 
 
 // Zod schema for common layer identification
+// Comp: compName (exact match, errors if missing), else compIndex (project item index), else the active comp.
+// Layer: layerIndex (1-based) or layerName.
 const LayerIdentifierSchema = {
-  compIndex: z.number().int().positive().describe("1-based index of the target composition in the project panel."),
-  layerIndex: z.number().int().positive().describe("1-based index of the target layer within the composition.")
+  compName: z.string().optional().describe("Name of the target composition (exact match). Preferred over compIndex."),
+  compIndex: z.number().int().positive().optional().describe("Project item index of the target composition. Used if compName is not given; if neither is given the active comp is used."),
+  layerIndex: z.number().int().positive().optional().describe("1-based index of the target layer within the composition."),
+  layerName: z.string().optional().describe("Name of the target layer. Used if layerIndex is not given.")
 };
 
 // Zod schema for keyframe value (more specific types might be needed depending on property)
@@ -481,7 +491,7 @@ server.tool(
         content: [
           {
             type: "text",
-            text: `Command to set keyframe for "${parameters.propertyName}" on layer ${parameters.layerIndex} in comp ${parameters.compIndex} has been queued.\n` +
+            text: `Command to set keyframe for "${parameters.propertyName}" on layer ${parameters.layerName ?? parameters.layerIndex} in comp ${parameters.compName ?? parameters.compIndex ?? "(active)"} has been queued.\n` +
                   `Use the "get-results" tool after a few seconds to check for confirmation.`
           }
         ]
@@ -519,7 +529,7 @@ server.tool(
         content: [
           {
             type: "text",
-            text: `Command to set expression for "${parameters.propertyName}" on layer ${parameters.layerIndex} in comp ${parameters.compIndex} has been queued.\n` +
+            text: `Command to set expression for "${parameters.propertyName}" on layer ${parameters.layerName ?? parameters.layerIndex} in comp ${parameters.compName ?? parameters.compIndex ?? "(active)"} has been queued.\n` +
                   `Use the "get-results" tool after a few seconds to check for confirmation.`
           }
         ]
@@ -661,8 +671,7 @@ server.tool(
   "apply-effect",
   "Apply an effect to a layer in After Effects",
   {
-    compIndex: z.number().int().positive().describe("1-based index of the target composition in the project panel."),
-    layerIndex: z.number().int().positive().describe("1-based index of the target layer within the composition."),
+    ...LayerIdentifierSchema,
     effectName: z.string().optional().describe("Display name of the effect to apply (e.g., 'Gaussian Blur')."),
     effectMatchName: z.string().optional().describe("After Effects internal name for the effect (more reliable, e.g., 'ADBE Gaussian Blur 2')."),
     effectCategory: z.string().optional().describe("Optional category for filtering effects."),
@@ -678,7 +687,7 @@ server.tool(
         content: [
           {
             type: "text",
-            text: `Command to apply effect to layer ${parameters.layerIndex} in composition ${parameters.compIndex} has been queued.\n` +
+            text: `Command to apply effect to layer ${parameters.layerName ?? parameters.layerIndex} in composition ${parameters.compName ?? parameters.compIndex ?? "(active)"} has been queued.\n` +
                   `Use the "get-results" tool after a few seconds to check for confirmation.`
           }
         ]
@@ -702,8 +711,7 @@ server.tool(
   "apply-effect-template",
   "Apply a predefined effect template to a layer in After Effects",
   {
-    compIndex: z.number().int().positive().describe("1-based index of the target composition in the project panel."),
-    layerIndex: z.number().int().positive().describe("1-based index of the target layer within the composition."),
+    ...LayerIdentifierSchema,
     templateName: z.enum([
       "gaussian-blur", 
       "directional-blur", 
@@ -726,7 +734,7 @@ server.tool(
         content: [
           {
             type: "text",
-            text: `Command to apply effect template '${parameters.templateName}' to layer ${parameters.layerIndex} in composition ${parameters.compIndex} has been queued.\n` +
+            text: `Command to apply effect template '${parameters.templateName}' to layer ${parameters.layerName ?? parameters.layerIndex} in composition ${parameters.compName ?? parameters.compIndex ?? "(active)"} has been queued.\n` +
                   `Use the "get-results" tool after a few seconds to check for confirmation.`
           }
         ]
@@ -752,8 +760,7 @@ server.tool(
   "mcp_aftereffects_applyEffect",
   "Apply an effect to a layer in After Effects",
   {
-    compIndex: z.number().int().positive().describe("1-based index of the target composition in the project panel."),
-    layerIndex: z.number().int().positive().describe("1-based index of the target layer within the composition."),
+    ...LayerIdentifierSchema,
     effectName: z.string().optional().describe("Display name of the effect to apply (e.g., 'Gaussian Blur')."),
     effectMatchName: z.string().optional().describe("After Effects internal name for the effect (more reliable, e.g., 'ADBE Gaussian Blur 2')."),
     effectSettings: z.record(z.string(), z.unknown()).optional().describe("Optional parameters for the effect (e.g., { 'Blurriness': 25 }).")
@@ -796,8 +803,7 @@ server.tool(
   "mcp_aftereffects_applyEffectTemplate",
   "Apply a predefined effect template to a layer in After Effects",
   {
-    compIndex: z.number().int().positive().describe("1-based index of the target composition in the project panel."),
-    layerIndex: z.number().int().positive().describe("1-based index of the target layer within the composition."),
+    ...LayerIdentifierSchema,
     templateName: z.enum([
       "gaussian-blur", 
       "directional-blur", 
