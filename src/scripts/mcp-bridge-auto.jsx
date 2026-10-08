@@ -1299,6 +1299,8 @@ function createNullLayer(args) {
         var comp = resolveComp(args.compName || "");
         var nullLayer = comp.layers.addNull(args.duration || comp.duration);
         nullLayer.name = args.name || "Null";
+        // Name the null's source after the layer too, so it can be found (and removed) in the Project panel
+        try { if (args.name) { nullLayer.source.name = args.name; } } catch (sourceNameError) {}
         var pos = args.position || [comp.width / 2, comp.height / 2];
         nullLayer.property("Position").setValue(pos);
         return JSON.stringify({
@@ -2364,6 +2366,35 @@ function exportFrame(args) {
     }
 }
 
+// --- deleteProjectItems: remove comps and footage/solids whose names start with a prefix ---
+// {namePrefix (at least 4 characters), dryRun?}. Removing an item also removes every layer that uses it.
+// Folders are never removed. Meant for cleaning up scratch items (e.g. the test harness's "MCPTEST_" items).
+function deleteProjectItems(args) {
+    try {
+        var prefix = args.namePrefix ? String(args.namePrefix) : "";
+        if (prefix.length < 4) { throw new Error("namePrefix is required and must be at least 4 characters, so this cannot match everything"); }
+        var matches = [];
+        for (var i = 1; i <= app.project.numItems; i++) {
+            var item = app.project.item(i);
+            if (item instanceof FolderItem) { continue; }
+            if (item.name.indexOf(prefix) === 0) { matches.push(item); }
+        }
+        var names = [];
+        for (var j = 0; j < matches.length; j++) { names.push(matches[j].name); }
+        if (!args.dryRun) {
+            for (var k = 0; k < matches.length; k++) { try { matches[k].remove(); } catch (removeError) {} }
+        }
+        return JSON.stringify({
+            status: "success",
+            message: args.dryRun ? "Dry run: nothing removed" : "Removed " + matches.length + " item(s)",
+            items: names,
+            numItems: app.project.numItems
+        }, null, 2);
+    } catch (error) {
+        return JSON.stringify({ status: "error", message: error.toString() }, null, 2);
+    }
+}
+
 // --- Render queue ---
 function renderStatusName(status) {
     if (status === RQItemStatus.WILL_CONTINUE) { return "will-continue"; }
@@ -2606,6 +2637,9 @@ function executeCommand(command, args, id) {
                 break;
             case "undo":
                 result = undoCommand(args);
+                break;
+            case "deleteProjectItems":
+                result = deleteProjectItems(args);
                 break;
             case "exportFrame":
                 result = exportFrame(args);

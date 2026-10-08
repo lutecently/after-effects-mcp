@@ -236,6 +236,10 @@ You can animate layers with:
 - `src/scripts/mcp-bridge-auto.jsx`: Main After Effects panel script
 - `install-bridge.js`: Script to install the panel in After Effects
 
+### 🧪 Testing
+
+`npm run test:bridge -- --run-in-open-project` runs an end-to-end test against a live After Effects. It drives the panel through the queue, so the MCP server does not need to be running. It builds scratch `MCPTEST_*` comps and solids and checks parenting, expressions, keyframes, effects, the safety guards, undo and the queue. It also decodes an exported frame to confirm the rotation really happened, then removes everything it created (add `--keep` to leave the items in place). Run it in a scratch project, with the MCP Bridge Auto panel open. It deliberately does not call `startRender`, so it never renders your queue.
+
 ### 🔌 Bridge protocol
 
 The server and the **MCP Bridge Auto** panel talk through `~/Documents/ae-mcp-bridge/`:

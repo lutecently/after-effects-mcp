@@ -188,6 +188,7 @@ server.tool(
       "undo",
       "getRenderStatus",
       "exportFrame",
+      "deleteProjectItems",
       "startRender",
       "addToRenderQueue"
     ];
@@ -382,6 +383,7 @@ Layer/comp management scripts (run via run-script; comps are found by compName, 
 - openProject: {path, saveCurrent (required true/false)}. Closes the current project first (saveCurrent false DISCARDS unsaved changes)
 - newProject: {saveCurrent (required true/false)}. Closes the current project first
 - undo: {steps? (default 1, max 20)}. Undoes the last N bridge commands that changed the project (one undo step per command; returns their names). Does not touch manual edits, and does not cover project/render commands
+- deleteProjectItems: {namePrefix (min 4 chars), dryRun?}. Removes comps/footage/solids whose names start with the prefix (and every layer using them). Folders are kept. For cleaning up scratch items
 - exportFrame: {compName? (default: active comp), time? (seconds, default: comp time), outputPath? (.png; default: ~/Documents/ae-mcp-bridge/frames/), overwrite?, scale? (1 full size, 2 half, 4 quarter)}. Saves one frame as a PNG and returns its path, so you can open the image and check the result
 - getRenderStatus: {}. Render queue items, status and output paths
 - startRender: {}. Renders everything queued. BLOCKS After Effects until done, so a long render outlasts the server's wait; read the outcome later with getRenderStatus / get-results
