@@ -2272,7 +2272,7 @@ function newProject(args) {
 var undoStack = [];
 var readOnlyCommands = {
     getProjectInfo: 1, listCompositions: 1, getLayerInfo: 1, getKeyframes: 1, getProjectStatus: 1,
-    getRenderStatus: 1, "test-animation": 1, bridgeTestEffects: 1
+    getRenderStatus: 1, exportFrame: 1, "test-animation": 1, bridgeTestEffects: 1
 };
 
 function resultIsError(resultString) {
@@ -2296,6 +2296,71 @@ function undoCommand(args) {
         return JSON.stringify(out, null, 2);
     } catch (error) {
         return JSON.stringify({ status: "error", message: error.toString() }, null, 2);
+    }
+}
+
+// --- exportFrame: save one frame of a comp as a PNG so it can be looked at ---
+// {compName? (default: active comp), time? (seconds, default: the comp's current time), outputPath? (.png),
+//  overwrite?, scale? (1 = full size, 2 = half, 4 = quarter)}
+// Without outputPath the frame goes to ~/Documents/ae-mcp-bridge/frames/ under a unique name.
+function exportFrame(args) {
+    var comp = null;
+    var savedFactor = null;
+    try {
+        args = args || {};
+        comp = resolveComp(args.compName || "");
+        if (typeof comp.saveFrameToPng !== "function") {
+            throw new Error("This version of After Effects has no CompItem.saveFrameToPng; frame export is unavailable");
+        }
+        var time = (args.time !== undefined && args.time !== null) ? Number(args.time) : comp.time;
+        if (!(time >= 0) || time > comp.duration) {
+            throw new Error("time " + args.time + " is outside the comp (0 to " + comp.duration + " seconds)");
+        }
+        var scale = args.scale ? parseInt(args.scale, 10) : 1;
+        if (!(scale >= 1 && scale <= 16)) { throw new Error("scale must be between 1 (full size) and 16"); }
+
+        var target;
+        if (args.outputPath) {
+            target = new File(args.outputPath);
+            if (!/\.png$/i.test(target.name)) { throw new Error("outputPath must end in .png"); }
+            if (!target.parent || !target.parent.exists) { throw new Error("Folder does not exist: " + (target.parent ? target.parent.fsName : args.outputPath)); }
+            if (target.exists && !args.overwrite) { throw new Error("File already exists: " + target.fsName + " (set overwrite: true to replace it)"); }
+        } else {
+            var safeName = comp.name.replace(/[^A-Za-z0-9_\-]+/g, "_");
+            target = new File(getBridgeSubfolder("frames").fsName + "/" + safeName + "-" + Math.round(time * 1000) + "ms-" + new Date().getTime() + ".png");
+        }
+
+        // Resolution factor is a comp setting; change it only for the export and always put it back
+        savedFactor = comp.resolutionFactor;
+        if (scale > 1) { comp.resolutionFactor = [scale, scale]; }
+        comp.saveFrameToPng(time, target);
+
+        // saveFrameToPng finishes in the background: wait (up to 20s) for the file to appear and stop growing
+        var bytes = 0, stableChecks = 0, waited = 0;
+        while (waited < 20000) {
+            var size = target.exists ? target.length : 0;
+            if (size > 0 && size === bytes) { stableChecks++; } else { stableChecks = 0; }
+            bytes = size;
+            if (stableChecks >= 2) { break; }
+            $.sleep(150);
+            waited += 150;
+        }
+        if (!target.exists || bytes === 0) { throw new Error("After Effects did not write a frame to " + target.fsName + " within 20 seconds"); }
+        return JSON.stringify({
+            status: "success",
+            message: "Frame exported",
+            path: target.fsName,
+            bytes: bytes,
+            composition: comp.name,
+            time: time,
+            scale: scale,
+            width: Math.round(comp.width / scale),
+            height: Math.round(comp.height / scale)
+        }, null, 2);
+    } catch (error) {
+        return JSON.stringify({ status: "error", message: error.toString() }, null, 2);
+    } finally {
+        if (comp && savedFactor) { try { comp.resolutionFactor = savedFactor; } catch (restoreError) {} }
     }
 }
 
@@ -2541,6 +2606,9 @@ function executeCommand(command, args, id) {
                 break;
             case "undo":
                 result = undoCommand(args);
+                break;
+            case "exportFrame":
+                result = exportFrame(args);
                 break;
             case "getRenderStatus":
                 result = getRenderStatus();

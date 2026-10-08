@@ -224,6 +224,7 @@ You can animate layers with:
 | `saveProject`               | Save, or Save As a path (won't overwrite without `overwrite`) |
 | `openProject` / `newProject`| Replace the open project (`saveCurrent` must be stated) |
 | `undo`                      | Undo the last N bridge commands       |
+| `exportFrame`               | Save one frame of a comp as a PNG (optional time and scale), so the result can be looked at |
 | `getRenderStatus`           | Render queue status and output paths  |
 | `startRender`               | Render the queue (blocks After Effects until done) |
 
