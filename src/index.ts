@@ -190,7 +190,15 @@ server.tool(
       "setCompositionProperties",
       "duplicateLayer",
       "deleteLayer",
-      "setLayerMask"
+      "setLayerMask",
+      "precomposeLayers",
+      "addCompToComp",
+      "setGuideLayer",
+      "setLayerParent",
+      "moveLayer",
+      "importFile",
+      "setEffectProperty",
+      "addToRenderQueue"
     ];
     
     if (!allowedScripts.includes(script)) {
@@ -367,6 +375,17 @@ Available scripts:
 - applyEffect: Apply an effect to a layer
 - applyEffectTemplate: Apply a predefined effect template to a layer
 
+Layer/comp management scripts (run via run-script; comps are found by compName, layers by layerIndex or layerName):
+- precomposeLayers: {compName, layerIndices[] or layerNames[], newCompName, moveAllAttributes (default true)}
+- addCompToComp: {compName (target), sourceCompName, opacity?, position?}
+- setGuideLayer: {compName, layerIndex|layerName, guideLayer (default true)}
+- setLayerParent: {compName, layerIndex|layerName, parentLayerIndex|parentLayerName, keepTransform?} or {..., clearParent: true}
+- moveLayer: {compName, layerIndex|layerName} plus ONE of: moveTo ("top"|"bottom"), toIndex, aboveLayerIndex|aboveLayerName, belowLayerIndex|belowLayerName
+- importFile: {filePath (absolute), folderName? (created if missing), addToComp? (true adds to compName or the active comp)}
+- setEffectProperty: {compName, layerIndex|layerName, effectName|effectIndex, propertyName, value}. Searches inside that effect only.
+- addToRenderQueue: {compName, outputModuleTemplate?, outputPath?}. Queues only; does not start rendering.
+- setLayerExpression also accepts an optional effectName to look for the property inside that effect only.
+
 Effect Templates:
 - gaussian-blur: Simple Gaussian blur effect
 - directional-blur: Motion blur in a specific direction
@@ -488,7 +507,8 @@ server.tool(
   {
     ...LayerIdentifierSchema, // Reuse common identifiers
     propertyName: z.string().describe("Name of the property to apply the expression to (e.g., 'Position', 'Scale', 'Rotation', 'Opacity')."),
-    expressionString: z.string().describe("The JavaScript expression string. Provide an empty string (\"\") to remove the expression.")
+    expressionString: z.string().describe("The JavaScript expression string. Provide an empty string (\"\") to remove the expression."),
+    effectName: z.string().optional().describe("Optional. Name of an effect on the layer. If given, the property is looked up inside that effect only (use when an effect and its parameter share a name, e.g. 'Exposure').")
   },
   async (parameters) => {
     try {

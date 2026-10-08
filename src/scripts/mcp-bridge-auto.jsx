@@ -808,9 +808,10 @@ function setLayerKeyframe(compIndex, layerIndex, propertyName, timeInSeconds, va
  * @param {number} layerIndex - The index of the layer within the composition (1-based).
  * @param {string} propertyName - The name of the property (e.g., "Position", "Scale", "Rotation", "Opacity").
  * @param {string} expressionString - The JavaScript expression string. Use "" to remove expression.
+ * @param {string} [effectName] - Optional. If given, only look for the property inside this effect.
  * @returns {string} JSON string indicating success or error.
  */
-function setLayerExpression(compIndex, layerIndex, propertyName, expressionString) {
+function setLayerExpression(compIndex, layerIndex, propertyName, expressionString, effectName) {
     try {
          // Adjust indices to be 0-based for ExtendScript arrays
         var comp = app.project.items[compIndex];
@@ -828,29 +829,41 @@ function setLayerExpression(compIndex, layerIndex, propertyName, expressionStrin
              // return JSON.stringify({ success: false, message: "Transform properties not found for layer '" + layer.name + "' (type: " + layer.matchName + ")." });
         }
 
-        var property = transformGroup ? transformGroup.property(propertyName) : null;
-         if (!property) {
-            // Check other common property groups if not in Transform
-             if (layer.property("Effects") && layer.property("Effects").property(propertyName)) {
-                 property = layer.property("Effects").property(propertyName);
-             } else if (layer.property("Text") && layer.property("Text").property(propertyName)) {
-                 property = layer.property("Text").property(propertyName);
-             }
-
-            // Search inside individual effects for sub-properties
-            if (!property && layer.property("Effects")) {
-                var effects = layer.property("Effects");
-                for (var ei = 1; ei <= effects.numProperties; ei++) {
-                    var eff = effects.property(ei);
-                    try {
-                        var subProp = eff.property(propertyName);
-                        if (subProp) { property = subProp; break; }
-                    } catch (e2) {}
-                }
+        var property = null;
+        if (effectName) {
+            // Caller named the effect: look for the property INSIDE that effect only
+            var targetEffect = findEffectOnLayer(layer, effectName);
+            if (!targetEffect) {
+                return JSON.stringify({ success: false, message: "Effect '" + effectName + "' not found on layer '" + layer.name + "'." });
             }
-
+            property = findPropertyInsideGroup(targetEffect, propertyName);
             if (!property) {
-                 return JSON.stringify({ success: false, message: "Property '" + propertyName + "' not found on layer '" + layer.name + "'." });
+                return JSON.stringify({ success: false, message: "Property '" + propertyName + "' not found inside effect '" + effectName + "' on layer '" + layer.name + "'." });
+            }
+        } else {
+            property = transformGroup ? transformGroup.property(propertyName) : null;
+            if (!property) {
+                // Check other common property groups if not in Transform
+                if (layer.property("Effects") && layer.property("Effects").property(propertyName)) {
+                    property = layer.property("Effects").property(propertyName);
+                } else if (layer.property("Text") && layer.property("Text").property(propertyName)) {
+                    property = layer.property("Text").property(propertyName);
+                }
+
+                // The name matched an effect itself (e.g. the Exposure effect, not its "Exposure" parameter).
+                // Fall through to that effect's first matching child property.
+                if (property && property.propertyType !== PropertyType.PROPERTY) {
+                    property = findPropertyInsideGroup(property, propertyName);
+                }
+
+                // Search inside individual effects for sub-properties
+                if (!property && layer.property("Effects")) {
+                    property = findPropertyInAnyEffect(layer, propertyName);
+                }
+
+                if (!property) {
+                     return JSON.stringify({ success: false, message: "Property '" + propertyName + "' not found on layer '" + layer.name + "'." });
+                }
             }
         }
 
@@ -1201,6 +1214,397 @@ function applyEffectTemplate(args) {
     }
 }
 
+// --- Shared helpers for the newer commands (precompose, parenting, import, etc.) ---
+
+// Find a comp by name. Same fallback rule as the older commands: use the active comp if not found.
+function resolveComp(compName) {
+    var comp = null;
+    for (var i = 1; i <= app.project.numItems; i++) {
+        var item = app.project.item(i);
+        if (item instanceof CompItem && item.name === compName) { comp = item; break; }
+    }
+    if (!comp) {
+        if (app.project.activeItem instanceof CompItem) { comp = app.project.activeItem; }
+        else { throw new Error("No composition found with name '" + compName + "' and no active composition"); }
+    }
+    return comp;
+}
+
+// Find a comp by exact name only (no active-comp fallback). Used when a comp is the *subject* of the command.
+function findCompByNameStrict(compName) {
+    for (var i = 1; i <= app.project.numItems; i++) {
+        var item = app.project.item(i);
+        if (item instanceof CompItem && item.name === compName) { return item; }
+    }
+    throw new Error("Composition not found: '" + compName + "'");
+}
+
+// Find a layer by index or name. Throws if it cannot be found.
+function resolveLayer(comp, layerIndex, layerName) {
+    var layer = null;
+    if (layerIndex !== undefined && layerIndex !== null) {
+        if (layerIndex > 0 && layerIndex <= comp.numLayers) { layer = comp.layer(layerIndex); }
+        else { throw new Error("Layer index out of bounds: " + layerIndex); }
+    } else if (layerName) {
+        for (var j = 1; j <= comp.numLayers; j++) {
+            if (comp.layer(j).name === layerName) { layer = comp.layer(j); break; }
+        }
+    }
+    if (!layer) { throw new Error("Layer not found: " + (layerName || "index " + layerIndex)); }
+    return layer;
+}
+
+// Find an effect on a layer by name/matchName (string) or 1-based index (number). Returns null if missing.
+function findEffectOnLayer(layer, effectNameOrIndex) {
+    var effects = layer.property("ADBE Effect Parade");
+    if (!effects) { return null; }
+    if (typeof effectNameOrIndex === "number") {
+        if (effectNameOrIndex >= 1 && effectNameOrIndex <= effects.numProperties) { return effects.property(effectNameOrIndex); }
+        return null;
+    }
+    for (var i = 1; i <= effects.numProperties; i++) {
+        var eff = effects.property(i);
+        if (eff.name === effectNameOrIndex || eff.matchName === effectNameOrIndex) { return eff; }
+    }
+    return null;
+}
+
+// Search INSIDE a property group (e.g. one effect) for a real property with this name.
+// Direct children are checked first, then nested groups. The group itself is never returned.
+function findPropertyInsideGroup(group, name) {
+    var i, p;
+    for (i = 1; i <= group.numProperties; i++) {
+        p = group.property(i);
+        if (p.propertyType === PropertyType.PROPERTY && (p.name === name || p.matchName === name)) { return p; }
+    }
+    for (i = 1; i <= group.numProperties; i++) {
+        p = group.property(i);
+        if (p.propertyType !== PropertyType.PROPERTY) {
+            var nested = findPropertyInsideGroup(p, name);
+            if (nested) { return nested; }
+        }
+    }
+    return null;
+}
+
+// Search every effect on the layer for a real property with this name (first match wins).
+function findPropertyInAnyEffect(layer, name) {
+    var effects = layer.property("ADBE Effect Parade");
+    if (!effects) { return null; }
+    for (var i = 1; i <= effects.numProperties; i++) {
+        var found = findPropertyInsideGroup(effects.property(i), name);
+        if (found) { return found; }
+    }
+    return null;
+}
+
+// Read a property value without letting an odd value type break the JSON result.
+function safePropertyValue(prop) {
+    try { return prop.value; } catch (e) { return null; }
+}
+
+// --- precomposeLayers: precompose layers into a new comp ---
+function precomposeLayers(args) {
+    try {
+        var comp = resolveComp(args.compName || "");
+        var newCompName = args.newCompName;
+        if (!newCompName) { throw new Error("newCompName is required"); }
+        var moveAll = (args.moveAllAttributes === undefined || args.moveAllAttributes === null) ? true : !!args.moveAllAttributes;
+
+        var indices = [];
+        var i, k;
+        if (args.layerIndices && args.layerIndices.length) {
+            for (i = 0; i < args.layerIndices.length; i++) {
+                var idx = args.layerIndices[i];
+                if (!(idx > 0 && idx <= comp.numLayers)) { throw new Error("Layer index out of bounds: " + idx); }
+                indices.push(idx);
+            }
+        } else if (args.layerNames && args.layerNames.length) {
+            for (i = 0; i < args.layerNames.length; i++) {
+                indices.push(resolveLayer(comp, null, args.layerNames[i]).index);
+            }
+        } else {
+            throw new Error("Provide layerIndices (array of numbers) or layerNames (array of names)");
+        }
+
+        // Sort ascending and drop duplicates
+        indices.sort(function (a, b) { return a - b; });
+        var unique = [];
+        for (k = 0; k < indices.length; k++) {
+            if (k === 0 || indices[k] !== indices[k - 1]) { unique.push(indices[k]); }
+        }
+
+        var newComp = comp.layers.precompose(unique, newCompName, moveAll);
+
+        // The new precomp layer is the one in the original comp whose source is the new comp
+        var newLayer = null;
+        for (var j = 1; j <= comp.numLayers; j++) {
+            if (comp.layer(j).source === newComp) { newLayer = comp.layer(j); break; }
+        }
+
+        return JSON.stringify({
+            status: "success",
+            message: "Layers precomposed successfully",
+            composition: { name: newComp.name, id: newComp.id, numLayers: newComp.numLayers },
+            layer: newLayer ? { name: newLayer.name, index: newLayer.index } : null,
+            precomposedCount: unique.length,
+            moveAllAttributes: moveAll
+        }, null, 2);
+    } catch (error) {
+        return JSON.stringify({ status: "error", message: error.toString() }, null, 2);
+    }
+}
+
+// --- addCompToComp: add an existing comp as a layer inside another comp ---
+function addCompToComp(args) {
+    try {
+        var comp = resolveComp(args.compName || "");
+        if (!args.sourceCompName) { throw new Error("sourceCompName is required"); }
+        var sourceComp = findCompByNameStrict(args.sourceCompName);
+        if (sourceComp === comp) { throw new Error("Cannot add a composition to itself"); }
+
+        var newLayer = comp.layers.add(sourceComp);
+        if (args.opacity !== undefined && args.opacity !== null) { newLayer.property("Opacity").setValue(args.opacity); }
+        if (args.position !== undefined && args.position !== null) { newLayer.property("Position").setValue(args.position); }
+
+        return JSON.stringify({
+            status: "success",
+            message: "Composition added as a layer successfully",
+            layer: {
+                name: newLayer.name,
+                index: newLayer.index,
+                source: sourceComp.name,
+                opacity: newLayer.property("Opacity").value,
+                position: newLayer.property("Position").value
+            },
+            composition: { name: comp.name }
+        }, null, 2);
+    } catch (error) {
+        return JSON.stringify({ status: "error", message: error.toString() }, null, 2);
+    }
+}
+
+// --- setGuideLayer: turn guide layer on/off ---
+function setGuideLayer(args) {
+    try {
+        var comp = resolveComp(args.compName || "");
+        var layer = resolveLayer(comp, args.layerIndex, args.layerName || "");
+        var guide = (args.guideLayer === undefined || args.guideLayer === null) ? true : !!args.guideLayer;
+        layer.guideLayer = guide;
+        return JSON.stringify({
+            status: "success",
+            message: "Guide layer " + (layer.guideLayer ? "enabled" : "disabled"),
+            layer: { name: layer.name, index: layer.index, guideLayer: layer.guideLayer }
+        }, null, 2);
+    } catch (error) {
+        return JSON.stringify({ status: "error", message: error.toString() }, null, 2);
+    }
+}
+
+// --- setLayerParent: parent a layer to another layer, or clear the parent ---
+function setLayerParent(args) {
+    try {
+        var comp = resolveComp(args.compName || "");
+        var layer = resolveLayer(comp, args.layerIndex, args.layerName || "");
+
+        if (args.clearParent) {
+            layer.parent = null;
+        } else {
+            if ((args.parentLayerIndex === undefined || args.parentLayerIndex === null) && !args.parentLayerName) {
+                throw new Error("Provide parentLayerIndex or parentLayerName, or set clearParent to true");
+            }
+            var parentLayer = resolveLayer(comp, args.parentLayerIndex, args.parentLayerName || "");
+            if (parentLayer.index === layer.index) { throw new Error("A layer cannot be its own parent"); }
+            if (args.keepTransform) { layer.setParentWithJump(parentLayer); }
+            else { layer.parent = parentLayer; }
+        }
+
+        return JSON.stringify({
+            status: "success",
+            message: layer.parent ? "Layer parented successfully" : "Parent cleared successfully",
+            layer: { name: layer.name, index: layer.index },
+            parent: layer.parent ? { name: layer.parent.name, index: layer.parent.index } : null
+        }, null, 2);
+    } catch (error) {
+        return JSON.stringify({ status: "error", message: error.toString() }, null, 2);
+    }
+}
+
+// --- moveLayer: reorder a layer in the stack ---
+// Exactly one of: moveTo ("top"/"bottom"), toIndex, aboveLayerIndex/aboveLayerName, belowLayerIndex/belowLayerName
+function moveLayer(args) {
+    try {
+        var comp = resolveComp(args.compName || "");
+        var layer = resolveLayer(comp, args.layerIndex, args.layerName || "");
+        var oldIndex = layer.index;
+
+        var hasAbove = (args.aboveLayerIndex !== undefined && args.aboveLayerIndex !== null) || !!args.aboveLayerName;
+        var hasBelow = (args.belowLayerIndex !== undefined && args.belowLayerIndex !== null) || !!args.belowLayerName;
+        var hasToIndex = (args.toIndex !== undefined && args.toIndex !== null);
+        var modeCount = (args.moveTo ? 1 : 0) + (hasToIndex ? 1 : 0) + (hasAbove ? 1 : 0) + (hasBelow ? 1 : 0);
+        if (modeCount !== 1) {
+            throw new Error("Provide exactly one of: moveTo ('top' or 'bottom'), toIndex, aboveLayerIndex/aboveLayerName, belowLayerIndex/belowLayerName");
+        }
+
+        if (args.moveTo) {
+            if (args.moveTo === "top") { layer.moveToBeginning(); }
+            else if (args.moveTo === "bottom") { layer.moveToEnd(); }
+            else { throw new Error("moveTo must be 'top' or 'bottom'"); }
+        } else if (hasToIndex) {
+            if (!(args.toIndex > 0 && args.toIndex <= comp.numLayers)) { throw new Error("toIndex out of bounds: " + args.toIndex); }
+            if (args.toIndex < layer.index) { layer.moveBefore(comp.layer(args.toIndex)); }
+            else if (args.toIndex > layer.index) { layer.moveAfter(comp.layer(args.toIndex)); }
+        } else if (hasAbove) {
+            var aboveLayer = resolveLayer(comp, args.aboveLayerIndex, args.aboveLayerName || "");
+            if (aboveLayer.index === layer.index) { throw new Error("Cannot move a layer relative to itself"); }
+            layer.moveBefore(aboveLayer);
+        } else {
+            var belowLayer = resolveLayer(comp, args.belowLayerIndex, args.belowLayerName || "");
+            if (belowLayer.index === layer.index) { throw new Error("Cannot move a layer relative to itself"); }
+            layer.moveAfter(belowLayer);
+        }
+
+        return JSON.stringify({
+            status: "success",
+            message: "Layer moved successfully",
+            layer: { name: layer.name, oldIndex: oldIndex, index: layer.index }
+        }, null, 2);
+    } catch (error) {
+        return JSON.stringify({ status: "error", message: error.toString() }, null, 2);
+    }
+}
+
+// --- importFile: import a file by absolute path, optionally into a folder and/or a comp ---
+function importFile(args) {
+    try {
+        var filePath = args.filePath;
+        if (!filePath) { throw new Error("filePath is required"); }
+        if (!/^(\/|~|[A-Za-z]:[\\\/]|\\\\)/.test(filePath)) { throw new Error("filePath must be an absolute path: " + filePath); }
+        var file = new File(filePath);
+        if (!file.exists) { throw new Error("File not found: " + filePath); }
+
+        var importOptions = new ImportOptions(file);
+        var item = app.project.importFile(importOptions);
+
+        var folderInfo = null;
+        if (args.folderName) {
+            var folder = null;
+            for (var i = 1; i <= app.project.numItems; i++) {
+                var candidate = app.project.item(i);
+                if (candidate instanceof FolderItem && candidate.name === args.folderName) { folder = candidate; break; }
+            }
+            var created = false;
+            if (!folder) { folder = app.project.items.addFolder(args.folderName); created = true; }
+            item.parentFolder = folder;
+            folderInfo = { name: folder.name, created: created };
+        }
+
+        var layerInfo = null;
+        if (args.addToComp) {
+            var comp = resolveComp(args.compName || "");
+            var newLayer = comp.layers.add(item);
+            layerInfo = { name: newLayer.name, index: newLayer.index, composition: comp.name };
+        }
+
+        return JSON.stringify({
+            status: "success",
+            message: "File imported successfully",
+            item: { name: item.name, id: item.id },
+            folder: folderInfo,
+            layer: layerInfo
+        }, null, 2);
+    } catch (error) {
+        return JSON.stringify({ status: "error", message: error.toString() }, null, 2);
+    }
+}
+
+// --- setEffectProperty: change a parameter on an effect that is already applied ---
+// Only searches INSIDE the named effect, so a parameter that shares its effect's name is found correctly.
+function setEffectProperty(args) {
+    try {
+        var comp = resolveComp(args.compName || "");
+        var layer = resolveLayer(comp, args.layerIndex, args.layerName || "");
+        if (!args.propertyName) { throw new Error("propertyName is required"); }
+        if (args.value === undefined) { throw new Error("value is required"); }
+
+        var effectRef = null;
+        if (args.effectIndex !== undefined && args.effectIndex !== null) { effectRef = args.effectIndex; }
+        else if (args.effectName) { effectRef = args.effectName; }
+        else { throw new Error("Provide effectName or effectIndex"); }
+
+        var effect = findEffectOnLayer(layer, effectRef);
+        if (!effect) { throw new Error("Effect not found on layer '" + layer.name + "': " + effectRef); }
+
+        var prop = findPropertyInsideGroup(effect, args.propertyName);
+        if (!prop) { throw new Error("Property '" + args.propertyName + "' not found inside effect '" + effect.name + "'"); }
+        if (prop.numKeys > 0) { throw new Error("Property '" + prop.name + "' has " + prop.numKeys + " keyframes; remove them before setting a static value"); }
+
+        var newValue = args.value;
+        if (typeof newValue === "boolean") { newValue = newValue ? 1 : 0; }
+        // Colour properties want 4 numbers [r, g, b, a]; accept [r, g, b] and assume alpha 1
+        if (prop.propertyValueType === PropertyValueType.COLOR && newValue instanceof Array && newValue.length === 3) {
+            newValue = [newValue[0], newValue[1], newValue[2], 1];
+        }
+
+        var oldValue = safePropertyValue(prop);
+        prop.setValue(newValue);
+
+        return JSON.stringify({
+            status: "success",
+            message: "Effect property set successfully",
+            effect: { name: effect.name, matchName: effect.matchName, index: effect.propertyIndex },
+            property: { name: prop.name, oldValue: oldValue, newValue: safePropertyValue(prop) },
+            layer: { name: layer.name, index: layer.index }
+        }, null, 2);
+    } catch (error) {
+        return JSON.stringify({ status: "error", message: error.toString() }, null, 2);
+    }
+}
+
+// --- addToRenderQueue: queue a comp (does NOT start rendering) ---
+function addToRenderQueue(args) {
+    try {
+        var comp = resolveComp(args.compName || "");
+        var rq = app.project.renderQueue;
+        var rqItem = rq.items.add(comp);
+        var om = rqItem.outputModule(1);
+
+        try {
+            if (args.outputModuleTemplate) {
+                var templates = om.templates;
+                var found = false;
+                var available = [];
+                for (var t = 0; t < templates.length; t++) {
+                    if (templates[t] === args.outputModuleTemplate) { found = true; }
+                    if (templates[t].indexOf("_HIDDEN") !== 0) { available.push(templates[t]); }
+                }
+                if (!found) { throw new Error("Output module template '" + args.outputModuleTemplate + "' not found. Available: " + available.join(", ")); }
+                om.applyTemplate(args.outputModuleTemplate);
+            }
+            if (args.outputPath) {
+                om.file = new File(args.outputPath);
+            }
+        } catch (setupError) {
+            // Undo only the queue item we just added so a bad template/path does not leave junk behind
+            rqItem.remove();
+            throw setupError;
+        }
+
+        return JSON.stringify({
+            status: "success",
+            message: "Composition added to render queue (not rendered)",
+            renderQueueItem: {
+                index: rq.numItems,
+                composition: comp.name,
+                outputModuleTemplate: args.outputModuleTemplate || null,
+                outputPath: om.file ? om.file.fsName : null
+            }
+        }, null, 2);
+    } catch (error) {
+        return JSON.stringify({ status: "error", message: error.toString() }, null, 2);
+    }
+}
+
 // --- End of Function Definitions ---
 
 // --- Bridge test function to verify communication and effects application ---
@@ -1547,7 +1951,7 @@ function executeCommand(command, args) {
                 break;
             case "setLayerExpression":
                 logToPanel("Calling setLayerExpression function...");
-                result = setLayerExpression(args.compIndex, args.layerIndex, args.propertyName, args.expressionString);
+                result = setLayerExpression(args.compIndex, args.layerIndex, args.propertyName, args.expressionString, args.effectName);
                 logToPanel("Returned from setLayerExpression.");
                 break;
             case "applyEffect":
@@ -1594,6 +1998,46 @@ function executeCommand(command, args) {
                 logToPanel("Calling setLayerMask function...");
                 result = setLayerMask(args);
                 logToPanel("Returned from setLayerMask.");
+                break;
+            case "precomposeLayers":
+                logToPanel("Calling precomposeLayers function...");
+                result = precomposeLayers(args);
+                logToPanel("Returned from precomposeLayers.");
+                break;
+            case "addCompToComp":
+                logToPanel("Calling addCompToComp function...");
+                result = addCompToComp(args);
+                logToPanel("Returned from addCompToComp.");
+                break;
+            case "setGuideLayer":
+                logToPanel("Calling setGuideLayer function...");
+                result = setGuideLayer(args);
+                logToPanel("Returned from setGuideLayer.");
+                break;
+            case "setLayerParent":
+                logToPanel("Calling setLayerParent function...");
+                result = setLayerParent(args);
+                logToPanel("Returned from setLayerParent.");
+                break;
+            case "moveLayer":
+                logToPanel("Calling moveLayer function...");
+                result = moveLayer(args);
+                logToPanel("Returned from moveLayer.");
+                break;
+            case "importFile":
+                logToPanel("Calling importFile function...");
+                result = importFile(args);
+                logToPanel("Returned from importFile.");
+                break;
+            case "setEffectProperty":
+                logToPanel("Calling setEffectProperty function...");
+                result = setEffectProperty(args);
+                logToPanel("Returned from setEffectProperty.");
+                break;
+            case "addToRenderQueue":
+                logToPanel("Calling addToRenderQueue function...");
+                result = addToRenderQueue(args);
+                logToPanel("Returned from addToRenderQueue.");
                 break;
             default:
                 result = JSON.stringify({ error: "Unknown command: " + command });
