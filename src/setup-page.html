@@ -1,0 +1,494 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>After Effects MCP Setup</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --ink: #f7f5ff;
+      --muted: #a9a5ba;
+      --panel: rgba(22, 18, 36, 0.82);
+      --line: rgba(255, 255, 255, 0.11);
+      --purple: #a777ff;
+      --pink: #ff6fb5;
+      --green: #65e0aa;
+      --amber: #ffc66d;
+      --red: #ff7c8c;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at 12% 5%, rgba(135, 74, 255, .25), transparent 32rem),
+        radial-gradient(circle at 95% 35%, rgba(255, 81, 170, .18), transparent 30rem),
+        #0b0912;
+      font: 15px/1.55 Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    body::before {
+      content: "";
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      background-image: linear-gradient(rgba(255,255,255,.018) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,.018) 1px, transparent 1px);
+      background-size: 32px 32px;
+      mask-image: linear-gradient(to bottom, black, transparent 70%);
+    }
+    main { width: min(1080px, calc(100% - 32px)); margin: 0 auto; padding: 64px 0 80px; position: relative; }
+    header { display: grid; grid-template-columns: 1fr auto; gap: 30px; align-items: end; margin-bottom: 34px; }
+    .eyebrow { color: var(--purple); text-transform: uppercase; letter-spacing: .16em; font-size: 12px; font-weight: 750; }
+    h1 { margin: 8px 0 10px; font-size: clamp(36px, 7vw, 72px); line-height: .96; letter-spacing: -.055em; max-width: 760px; }
+    .intro { color: var(--muted); max-width: 650px; font-size: 17px; }
+    .badge { border: 1px solid var(--line); background: rgba(255,255,255,.04); border-radius: 999px; padding: 8px 13px; color: var(--muted); white-space: nowrap; }
+    .grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 20px; }
+    .status-card, .panel { border: 1px solid var(--line); background: var(--panel); backdrop-filter: blur(18px); box-shadow: 0 22px 60px rgba(0,0,0,.23); }
+    .status-card { border-radius: 16px; padding: 16px; min-height: 104px; }
+    .status-card small { display: block; color: var(--muted); margin-bottom: 12px; }
+    .status-value { font-size: 17px; font-weight: 700; overflow-wrap: anywhere; }
+    .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 8px; background: var(--muted); box-shadow: 0 0 12px currentColor; }
+    .ok .dot { background: var(--green); color: var(--green); }
+    .warn .dot { background: var(--amber); color: var(--amber); }
+    .bad .dot { background: var(--red); color: var(--red); }
+    .panel { border-radius: 22px; padding: 26px; margin-top: 14px; }
+    .step { display: flex; gap: 14px; align-items: flex-start; margin-bottom: 22px; }
+    .step-number { width: 32px; height: 32px; display: grid; place-items: center; flex: 0 0 auto; border-radius: 10px; background: linear-gradient(135deg, var(--purple), var(--pink)); font-weight: 800; }
+    h2 { margin: 1px 0 4px; font-size: 21px; letter-spacing: -.02em; }
+    p { margin: 0; }
+    .subtle { color: var(--muted); }
+    .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+    .stack { display: grid; gap: 12px; }
+    label { color: var(--muted); font-size: 13px; }
+    select, input, button, textarea { font: inherit; }
+    select, input {
+      width: 100%; color: var(--ink); background: #100d1a; border: 1px solid var(--line); border-radius: 11px; padding: 12px 13px; outline: none;
+    }
+    textarea {
+      width: 100%; min-height: 100px; resize: vertical; color: var(--ink); background: #100d1a; border: 1px solid var(--line); border-radius: 11px; padding: 12px 13px; outline: none; font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+    select:focus, input:focus { border-color: var(--purple); box-shadow: 0 0 0 3px rgba(167,119,255,.13); }
+    button {
+      border: 0; border-radius: 11px; padding: 11px 16px; cursor: pointer; color: #120d20; background: var(--ink); font-weight: 750; transition: transform .15s ease, opacity .15s ease;
+    }
+    button:hover { transform: translateY(-1px); }
+    button:disabled { opacity: .45; cursor: wait; transform: none; }
+    button.primary { background: linear-gradient(135deg, var(--purple), var(--pink)); color: white; }
+    button.ghost { color: var(--ink); background: rgba(255,255,255,.07); border: 1px solid var(--line); }
+    .field { display: grid; gap: 7px; flex: 1 1 360px; }
+    .path { margin-top: 12px; padding: 10px 12px; border-radius: 10px; color: var(--muted); background: rgba(255,255,255,.035); font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere; }
+    .tabs { display: flex; gap: 7px; margin-bottom: 10px; }
+    .tabs button { padding: 7px 11px; background: transparent; color: var(--muted); border: 1px solid var(--line); }
+    .tabs button.active { color: white; border-color: var(--purple); background: rgba(167,119,255,.13); }
+    pre { margin: 0; min-height: 110px; max-height: 250px; overflow: auto; padding: 15px; border-radius: 12px; background: #08070d; border: 1px solid var(--line); color: #d9d3ed; white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .message { display: none; margin-top: 14px; padding: 12px 14px; border-radius: 11px; border: 1px solid var(--line); background: rgba(255,255,255,.04); }
+    .message.show { display: block; }
+    .message.success { border-color: rgba(101,224,170,.35); color: var(--green); }
+    .message.error { border-color: rgba(255,124,140,.35); color: var(--red); }
+    .footer { display: flex; justify-content: space-between; align-items: center; gap: 15px; margin-top: 22px; color: var(--muted); font-size: 13px; }
+    .two { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+    .settings-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+    .check { display: flex; gap: 10px; align-items: center; color: var(--ink); padding-top: 8px; }
+    .check input { width: auto; accent-color: var(--purple); }
+    .check-copy { display: grid; gap: 2px; }
+    .check-copy small { color: var(--muted); font-size: 12px; }
+    .checklist-head { display: flex; justify-content: space-between; gap: 16px; align-items: center; margin-bottom: 14px; }
+    .progress { height: 7px; overflow: hidden; border-radius: 999px; background: rgba(255,255,255,.07); }
+    .progress span { display: block; height: 100%; width: 0; border-radius: inherit; background: linear-gradient(90deg, var(--purple), var(--pink)); transition: width .25s ease; }
+    .checklist { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 18px; margin: 16px 0 0; padding: 0; list-style: none; }
+    .checklist li { display: flex; gap: 9px; align-items: flex-start; color: var(--muted); }
+    .checklist li::before { content: ""; width: 17px; height: 17px; margin-top: 3px; flex: 0 0 auto; border: 1px solid var(--line); border-radius: 50%; }
+    .checklist li.complete { color: var(--ink); }
+    .checklist li.complete::before { content: "✓"; display: grid; place-items: center; color: #08140f; background: var(--green); border-color: var(--green); font-size: 11px; font-weight: 900; }
+    .advanced-settings { display: none; margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--line); }
+    .advanced-settings.open { display: block; }
+    .activity-box { border: 1px solid var(--line); border-radius: 13px; background: rgba(0,0,0,.18); padding: 14px; min-height: 145px; }
+    .activity-box h3 { margin: 0 0 9px; font-size: 14px; }
+    .activity-list { margin: 0; padding: 0; list-style: none; color: var(--muted); font: 12px/1.65 ui-monospace, SFMono-Regular, Menlo, monospace; max-height: 220px; overflow: auto; }
+    .activity-list li { padding: 3px 0; border-bottom: 1px solid rgba(255,255,255,.04); overflow-wrap: anywhere; }
+    .pill { display: inline-block; margin-left: 6px; padding: 2px 7px; border-radius: 999px; font-size: 10px; color: var(--muted); border: 1px solid var(--line); }
+    .tool-list { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; max-height: 310px; overflow: auto; margin-top: 12px; }
+    .tool { padding: 10px; border: 1px solid var(--line); border-radius: 10px; background: rgba(255,255,255,.025); overflow-wrap: anywhere; font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .tool.readonly { border-color: rgba(101,224,170,.2); }
+    .primary-tabs { position: sticky; top: 12px; z-index: 10; display: flex; gap: 6px; margin: 0 0 20px; padding: 7px; overflow-x: auto; border: 1px solid var(--line); border-radius: 15px; background: rgba(12,9,20,.88); backdrop-filter: blur(20px); box-shadow: 0 14px 40px rgba(0,0,0,.25); }
+    .primary-tabs button { flex: 1 0 auto; padding: 9px 14px; color: var(--muted); background: transparent; border: 1px solid transparent; }
+    .primary-tabs button.active { color: white; background: rgba(167,119,255,.14); border-color: rgba(167,119,255,.4); }
+    .tab-panel { display: none; }
+    .tab-panel.active { display: block; animation: reveal .2s ease-out; }
+    .tab-panel:not([data-tab-panel="setup"]) .step-number { display: none; }
+    @keyframes reveal { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+    .spinner { display: inline-block; width: 13px; height: 13px; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: spin .7s linear infinite; vertical-align: -2px; margin-right: 8px; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    @media (max-width: 760px) {
+      main { padding-top: 35px; }
+      header { grid-template-columns: 1fr; }
+      .badge { justify-self: start; }
+      .grid { grid-template-columns: repeat(2, 1fr); }
+      .two, .settings-grid, .tool-list, .checklist { grid-template-columns: 1fr; }
+      .panel { padding: 20px; }
+      .primary-tabs button { flex: 0 0 auto; }
+      .footer { align-items: flex-start; flex-direction: column; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <div>
+        <div class="eyebrow">Local setup dashboard</div>
+        <h1>After Effects,<br>meet your agent.</h1>
+        <p class="intro">Install the bridge, connect your MCP client, and verify the full round trip without hand-editing paths.</p>
+      </div>
+      <div class="badge">Bound to 127.0.0.1</div>
+    </header>
+
+    <nav class="primary-tabs" aria-label="Dashboard sections">
+      <button class="active" data-main-tab="setup" aria-selected="true">Setup</button>
+      <button data-main-tab="activity" aria-selected="false">Activity</button>
+      <button data-main-tab="tools" aria-selected="false">Tools</button>
+      <button data-main-tab="settings" aria-selected="false">Settings</button>
+      <button data-main-tab="maintenance" aria-selected="false">Maintenance</button>
+    </nav>
+
+    <div class="tab-panel active" data-tab-panel="setup">
+    <section class="grid" aria-label="System status">
+      <div class="status-card" id="nodeCard"><small>Node.js</small><div class="status-value"><span class="dot"></span><span id="nodeValue">Checking…</span></div></div>
+      <div class="status-card" id="aeCard"><small>After Effects</small><div class="status-value"><span class="dot"></span><span id="aeValue">Checking…</span></div></div>
+      <div class="status-card" id="panelCard"><small>Bridge panel</small><div class="status-value"><span class="dot"></span><span id="panelValue">Checking…</span></div></div>
+      <div class="status-card" id="serverCard"><small>MCP server</small><div class="status-value"><span class="dot"></span><span id="serverValue">Checking…</span></div></div>
+    </section>
+
+    <section class="panel" aria-labelledby="checklistTitle">
+      <div class="checklist-head">
+        <div><h2 id="checklistTitle">Finish setup</h2><p class="subtle">The essentials needed for a working MCP connection.</p></div>
+        <strong id="checklistProgress">0 of 4</strong>
+      </div>
+      <div class="progress" aria-hidden="true"><span id="checklistProgressBar"></span></div>
+      <ul class="checklist" id="setupChecklist"><li>Checking setup…</li></ul>
+    </section>
+
+    <section class="panel">
+      <div class="step"><div class="step-number">1</div><div><h2>Install the After Effects bridge</h2><p class="subtle">Choose an installation. Existing panels are backed up before replacement. macOS may request administrator authorization for the application folder.</p></div></div>
+      <div class="stack">
+        <div class="field">
+          <label for="aeSelect">Detected installation</label>
+          <select id="aeSelect"><option value="">Detecting After Effects…</option></select>
+        </div>
+        <div class="field">
+          <label for="manualPath">Or enter a custom installation path</label>
+          <input id="manualPath" type="text" placeholder="/Applications/Adobe After Effects 2026">
+        </div>
+        <div class="row">
+          <button class="primary" id="installButton">Install or update panel</button>
+          <button class="ghost" id="restoreButton">Restore latest backup</button>
+          <button class="ghost" id="uninstallButton">Uninstall safely</button>
+          <button class="ghost" id="refreshButton">Refresh detection</button>
+        </div>
+      </div>
+      <div class="message" id="installMessage"></div>
+    </section>
+
+    <section class="panel">
+      <div class="step"><div class="step-number">2</div><div><h2>Connect an MCP client</h2><p class="subtle">Copy the configuration for the client you use. It points to this installation’s server entry.</p></div></div>
+      <div class="tabs" role="tablist">
+        <button class="active" data-config="codex">Codex</button>
+        <button data-config="claude">Claude</button>
+        <button data-config="cursor">Cursor</button>
+      </div>
+      <pre id="configOutput">Loading configuration…</pre>
+      <div class="row" style="margin-top: 10px">
+        <button class="primary" id="configureButton">Configure Codex automatically</button>
+        <button class="ghost" id="copyButton">Copy configuration</button>
+      </div>
+      <div class="message" id="copyMessage"></div>
+    </section>
+
+    <section class="panel">
+      <div class="step"><div class="step-number">3</div><div><h2>Test the live bridge</h2><p class="subtle">Open After Effects, choose Window → mcp-bridge-auto.jsx, and leave Auto-run commands enabled.</p></div></div>
+      <div class="row">
+        <button class="primary" id="testButton">Run connection test</button>
+        <button class="ghost" id="revealButton">Open bridge folder</button>
+      </div>
+      <div class="path" id="bridgePath">Loading bridge path…</div>
+      <div class="message" id="testMessage"></div>
+    </section>
+    </div>
+
+    <section class="panel tab-panel" data-tab-panel="settings">
+      <div class="step"><div class="step-number">4</div><div><h2>Safety and runtime settings</h2><p class="subtle">These settings are shared by the MCP server and After Effects panel. Reopen the panel after changing polling or auto-run.</p></div></div>
+      <div class="settings-grid">
+        <div class="field"><label for="safetyMode">Safety mode</label><select id="safetyMode"><option value="read-only">Read-only</option><option value="editing">Standard editing</option><option value="full">Full access</option></select></div>
+      </div>
+      <label class="check"><input id="autoRun" type="checkbox"> Start the panel with Auto-run enabled</label>
+      <label class="check"><input id="autoBackupHighImpact" type="checkbox"><span class="check-copy">Automatically back up before high-impact commands<small>Preserves the last saved project state before project replacement, project-item deletion, or rendering. A command is blocked if its backup cannot be created.</small></span></label>
+      <div class="row" style="margin-top: 16px"><button class="ghost" id="advancedSettingsButton" aria-expanded="false" aria-controls="advancedSettings">Show advanced settings</button></div>
+      <div class="advanced-settings" id="advancedSettings">
+        <div class="settings-grid">
+          <div class="field"><label for="pollIntervalMs">Panel poll interval (ms)</label><input id="pollIntervalMs" type="number" min="250" max="30000"></div>
+          <div class="field"><label for="responseTimeoutMs">Response timeout (ms)</label><input id="responseTimeoutMs" type="number" min="1000" max="120000"></div>
+          <div class="field"><label for="commandExpiryMs">Queue expiry (ms)</label><input id="commandExpiryMs" type="number" min="10000" max="86400000"></div>
+          <div class="field"><label for="resultRetention">Retained results</label><input id="resultRetention" type="number" min="10" max="5000"></div>
+          <div class="field"><label for="maxCommandsPerTick">Commands per tick</label><input id="maxCommandsPerTick" type="number" min="1" max="100"></div>
+        </div>
+      </div>
+      <div class="row" style="margin-top: 16px"><button class="primary" id="saveSettingsButton">Save settings</button></div>
+      <div class="message" id="settingsMessage"></div>
+    </section>
+
+    <section class="panel tab-panel" data-tab-panel="activity">
+      <div class="step"><div class="step-number">5</div><div><h2>Live activity</h2><p class="subtle" id="heartbeatSummary">Waiting for the panel heartbeat…</p></div></div>
+      <div class="two">
+        <div class="activity-box"><h3>Command queue</h3><ul class="activity-list" id="queueList"><li>Empty</li></ul></div>
+        <div class="activity-box"><h3>Recent results</h3><ul class="activity-list" id="resultList"><li>No results</li></ul></div>
+      </div>
+      <div class="activity-box" style="margin-top:14px"><h3>Panel log</h3><ul class="activity-list" id="logList"><li>No panel logs yet</li></ul></div>
+      <div class="row" style="margin-top:14px">
+        <button class="ghost" id="clearStaleButton">Clear stale queue entries</button>
+        <button class="ghost" id="archiveDataButton">Archive bridge data</button>
+      </div>
+      <div class="message" id="activityMessage"></div>
+    </section>
+
+    <section class="panel tab-panel" data-tab-panel="tools">
+      <div class="step"><div class="step-number">6</div><div><h2>Tool explorer</h2><p class="subtle">Browse everything the panel supports. The test console only permits strictly read-only tools.</p></div></div>
+      <input id="toolSearch" type="search" placeholder="Filter tools…">
+      <div class="tool-list" id="toolList"></div>
+      <div class="two" style="margin-top:16px">
+        <div class="field"><label for="toolSelect">Read-only test tool</label><select id="toolSelect"></select></div>
+        <div class="field"><label for="toolArgs">Arguments as JSON</label><textarea id="toolArgs">{}</textarea></div>
+      </div>
+      <div class="row" style="margin-top:12px"><button class="primary" id="runToolButton">Run read-only tool</button></div>
+      <pre id="toolOutput" style="margin-top:12px; min-height:70px">No test run yet.</pre>
+    </section>
+
+    <section class="panel tab-panel" data-tab-panel="maintenance">
+      <div class="step"><div class="step-number">7</div><div><h2>Maintenance and diagnostics</h2><p class="subtle">Check the npm release and export a sanitized support report.</p></div></div>
+      <div class="row">
+        <button class="ghost" id="updateButton">Check for updates</button>
+        <button class="ghost" id="diagnosticsButton">Download diagnostics</button>
+      </div>
+      <div class="message" id="maintenanceMessage"></div>
+    </section>
+
+    <div class="footer">
+      <span>This page and its API are available only for this local setup session.</span>
+      <button class="ghost" id="closeButton">Close setup server</button>
+    </div>
+  </main>
+
+  <script>
+    const token = new URLSearchParams(location.search).get("token");
+    let state = null;
+    let activeConfig = "codex";
+    const $ = (id) => document.getElementById(id);
+
+    async function api(path, options = {}) {
+      const response = await fetch(path, { ...options, headers: { "Content-Type": "application/json", "X-Setup-Token": token, ...(options.headers || {}) } });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || "Request failed.");
+      return data;
+    }
+
+    function card(id, tone, value) {
+      const element = $(id + "Card");
+      element.classList.remove("ok", "warn", "bad");
+      element.classList.add(tone);
+      $(id + "Value").textContent = value;
+    }
+
+    function message(id, text, kind) {
+      const element = $(id);
+      element.className = `message show ${kind || ""}`;
+      element.textContent = text;
+    }
+
+    function setBusy(button, busy, label) {
+      button.disabled = busy;
+      if (!button.dataset.label) button.dataset.label = button.textContent;
+      button.innerHTML = busy ? `<span class="spinner"></span>${label}` : button.dataset.label;
+    }
+
+    function selectedAePath() { return $("manualPath").value.trim() || $("aeSelect").value; }
+    function age(ms) { if (ms < 1000) return "now"; if (ms < 60000) return `${Math.round(ms / 1000)}s`; return `${Math.round(ms / 60000)}m`; }
+
+    function renderActivity(activity) {
+      const heartbeat = activity.heartbeat;
+      $("heartbeatSummary").textContent = activity.connected
+        ? `Connected · After Effects ${heartbeat.aeVersion || ""} · ${heartbeat.project?.name || "unsaved project"} · ${heartbeat.safetyMode || "full"} safety`
+        : "Panel heartbeat unavailable. Open or reinstall the panel to enable live status.";
+      const renderList = (id, items, formatter, empty) => {
+        const list = $(id); list.replaceChildren();
+        if (!items.length) { const li = document.createElement("li"); li.textContent = empty; list.append(li); return; }
+        for (const item of items) { const li = document.createElement("li"); li.textContent = formatter(item); list.append(li); }
+      };
+      renderList("queueList", activity.queue, (item) => `${item.command || item.name} · ${age(item.ageMs)} old`, "Queue is empty");
+      renderList("resultList", activity.results, (item) => `${item.command || item.name} · ${item.status} · ${age(item.ageMs)} ago`, "No retained results");
+      renderList("logList", activity.logs, (line) => line, "No panel logs yet");
+    }
+
+    function renderTools(filter = "") {
+      if (!state) return;
+      const needle = filter.trim().toLowerCase();
+      const tools = state.tools.filter((tool) => !needle || tool.name.toLowerCase().includes(needle) || tool.category.toLowerCase().includes(needle));
+      const list = $("toolList"); list.replaceChildren();
+      for (const tool of tools) {
+        const item = document.createElement("div"); item.className = `tool${tool.readOnly ? " readonly" : ""}`;
+        item.textContent = tool.name;
+        const pill = document.createElement("span"); pill.className = "pill"; pill.textContent = tool.readOnly ? "read-only" : tool.category;
+        item.append(pill); list.append(item);
+      }
+    }
+
+    function renderChecklist(firstRun) {
+      const checklist = $("setupChecklist"); checklist.replaceChildren();
+      const completed = Number(firstRun?.completed || 0);
+      const total = Number(firstRun?.total || 0);
+      $("checklistProgress").textContent = `${completed} of ${total}`;
+      $("checklistProgressBar").style.width = total ? `${Math.round(completed / total * 100)}%` : "0%";
+      for (const item of firstRun?.items || []) {
+        const row = document.createElement("li");
+        row.className = item.complete ? "complete" : "";
+        const copy = document.createElement("span"); copy.textContent = item.label;
+        if (item.detail) { const detail = document.createElement("small"); detail.className = "subtle"; detail.textContent = ` · ${new Date(item.detail).toLocaleString()}`; copy.append(detail); }
+        row.append(copy); checklist.append(row);
+      }
+    }
+
+    function populateSettings(settings) {
+      for (const key of ["safetyMode", "pollIntervalMs", "responseTimeoutMs", "commandExpiryMs", "resultRetention", "maxCommandsPerTick"]) $(key).value = settings[key];
+      $("autoRun").checked = settings.autoRun !== false;
+      $("autoBackupHighImpact").checked = settings.autoBackupHighImpact !== false;
+    }
+
+    function renderStatus(data) {
+      state = data;
+      card("node", Number(data.nodeVersion.slice(1).split(".")[0]) >= 18 ? "ok" : "bad", data.nodeVersion);
+      card("server", data.serverEntryExists && data.sourcePanelExists ? "ok" : "bad", data.serverEntryExists ? `Ready · v${data.packageVersion}` : "Build missing");
+      card("ae", data.installs.length ? "ok" : "warn", data.installs.length ? `${data.installs.length} detected` : "Not detected");
+      const current = data.installs.filter((item) => item.panelCurrent).length;
+      const installed = data.installs.filter((item) => item.panelInstalled).length;
+      card("panel", data.activity.connected ? "ok" : current ? "ok" : installed ? "warn" : "bad", data.activity.connected ? "Connected" : current ? "Up to date" : installed ? "Update available" : "Not installed");
+      $("bridgePath").textContent = data.bridgeDir;
+      const select = $("aeSelect"); const previous = select.value; select.replaceChildren();
+      if (!data.installs.length) select.add(new Option("No installations detected", ""));
+      for (const item of data.installs) {
+        const suffix = item.panelCurrent ? " — panel current" : item.panelInstalled ? " — update available" : " — panel missing";
+        select.add(new Option(item.name + suffix, item.path));
+      }
+      if ([...select.options].some((option) => option.value === previous)) select.value = previous;
+      populateSettings(data.settings); renderChecklist(data.firstRun); renderConfig(); renderActivity(data.activity); renderTools($("toolSearch").value);
+      const readOnlyTools = data.tools.filter((tool) => tool.readOnly);
+      const toolSelect = $("toolSelect"); const selected = toolSelect.value; toolSelect.replaceChildren();
+      for (const tool of readOnlyTools) toolSelect.add(new Option(tool.name, tool.name));
+      if ([...toolSelect.options].some((option) => option.value === selected)) toolSelect.value = selected;
+    }
+
+    function renderConfig() {
+      if (!state) return;
+      $("configOutput").textContent = state.config[activeConfig];
+      $("configureButton").textContent = `Configure ${activeConfig[0].toUpperCase() + activeConfig.slice(1)} automatically`;
+      $("configureButton").dataset.label = $("configureButton").textContent;
+      document.querySelectorAll("[data-config]").forEach((button) => button.classList.toggle("active", button.dataset.config === activeConfig));
+    }
+
+    async function refresh() { try { renderStatus(await api("/api/status")); } catch (error) { message("installMessage", error.message, "error"); } }
+    async function refreshActivity() { try { renderActivity(await api("/api/activity")); } catch {} }
+
+    function activateMainTab(name, updateHash = true) {
+      const valid = [...document.querySelectorAll("[data-main-tab]")].some((button) => button.dataset.mainTab === name);
+      const selected = valid ? name : "setup";
+      document.querySelectorAll("[data-main-tab]").forEach((button) => {
+        const active = button.dataset.mainTab === selected;
+        button.classList.toggle("active", active);
+        button.setAttribute("aria-selected", String(active));
+      });
+      document.querySelectorAll("[data-tab-panel]").forEach((panel) => panel.classList.toggle("active", panel.dataset.tabPanel === selected));
+      if (selected === "activity") refreshActivity();
+      if (updateHash) history.replaceState(null, "", `${location.pathname}${location.search}#${selected}`);
+    }
+
+    document.querySelectorAll("[data-main-tab]").forEach((button) => button.addEventListener("click", () => activateMainTab(button.dataset.mainTab)));
+    document.querySelectorAll("[data-config]").forEach((button) => button.addEventListener("click", () => { activeConfig = button.dataset.config; renderConfig(); }));
+    $("refreshButton").addEventListener("click", refresh);
+    $("toolSearch").addEventListener("input", (event) => renderTools(event.target.value));
+    $("advancedSettingsButton").addEventListener("click", () => {
+      const open = !$("advancedSettings").classList.contains("open");
+      $("advancedSettings").classList.toggle("open", open);
+      $("advancedSettingsButton").setAttribute("aria-expanded", String(open));
+      $("advancedSettingsButton").textContent = open ? "Hide advanced settings" : "Show advanced settings";
+    });
+
+    $("installButton").addEventListener("click", async () => {
+      const button = $("installButton"); setBusy(button, true, "Installing…");
+      try { const result = await api("/api/install", { method: "POST", body: JSON.stringify({ aePath: selectedAePath() }) }); message("installMessage", `Installed to ${result.destination}${result.backup ? `. Backup: ${result.backup}` : "."}`, "success"); await refresh(); }
+      catch (error) { message("installMessage", error.message, "error"); }
+      finally { setBusy(button, false); }
+    });
+
+    $("restoreButton").addEventListener("click", async () => {
+      const button = $("restoreButton"); setBusy(button, true, "Restoring…");
+      try { const result = await api("/api/restore", { method: "POST", body: JSON.stringify({ aePath: selectedAePath() }) }); message("installMessage", `Restored ${result.restoredFrom}`, "success"); await refresh(); }
+      catch (error) { message("installMessage", error.message, "error"); } finally { setBusy(button, false); }
+    });
+
+    $("uninstallButton").addEventListener("click", async () => {
+      if (!confirm("Move the installed bridge panel to a recoverable backup?")) return;
+      const button = $("uninstallButton"); setBusy(button, true, "Removing…");
+      try { const result = await api("/api/uninstall", { method: "POST", body: JSON.stringify({ aePath: selectedAePath() }) }); message("installMessage", `Panel moved to ${result.removed}. It can be restored later.`, "success"); await refresh(); }
+      catch (error) { message("installMessage", error.message, "error"); } finally { setBusy(button, false); }
+    });
+
+    $("configureButton").addEventListener("click", async () => {
+      if (!confirm(`Update the ${activeConfig} MCP configuration? An existing config file will be backed up first.`)) return;
+      const button = $("configureButton"); setBusy(button, true, "Configuring…");
+      try { const result = await api("/api/configure-client", { method: "POST", body: JSON.stringify({ client: activeConfig }) }); message("copyMessage", `Configured and validated ${activeConfig}.${result.backup ? ` Backup: ${result.backup}` : ""}`, "success"); await refresh(); }
+      catch (error) { message("copyMessage", error.message, "error"); } finally { setBusy(button, false); }
+    });
+
+    $("copyButton").addEventListener("click", async () => {
+      try { await navigator.clipboard.writeText($("configOutput").textContent); message("copyMessage", "Configuration copied to the clipboard.", "success"); }
+      catch { message("copyMessage", "Clipboard access was blocked. Select and copy the configuration above.", "error"); }
+    });
+
+    $("testButton").addEventListener("click", async () => {
+      const button = $("testButton"); setBusy(button, true, "Waiting for After Effects…"); message("testMessage", "A read-only getCapabilities command was queued.", "");
+      try { const result = await api("/api/test", { method: "POST", body: "{}" }); if (result.ok) { const count = Array.isArray(result.result.commands) ? result.result.commands.length : 0; message("testMessage", `Connected to After Effects ${result.result.aeVersion || ""}. Bridge ${result.result.bridgeVersion || "unknown"}; ${count} commands available.`, "success"); await refresh(); } else message("testMessage", result.message, "error"); }
+      catch (error) { message("testMessage", error.message, "error"); } finally { setBusy(button, false); }
+    });
+
+    $("revealButton").addEventListener("click", async () => { try { await api("/api/reveal", { method: "POST", body: "{}" }); } catch (error) { message("testMessage", error.message, "error"); } });
+
+    $("saveSettingsButton").addEventListener("click", async () => {
+      const values = { safetyMode: $("safetyMode").value, autoRun: $("autoRun").checked, autoBackupHighImpact: $("autoBackupHighImpact").checked };
+      for (const key of ["pollIntervalMs", "responseTimeoutMs", "commandExpiryMs", "resultRetention", "maxCommandsPerTick"]) values[key] = Number($(key).value);
+      try { const result = await api("/api/settings", { method: "POST", body: JSON.stringify(values) }); populateSettings(result.settings); message("settingsMessage", "Settings saved. Safety changes apply immediately; reopen the panel for polling and auto-run changes.", "success"); }
+      catch (error) { message("settingsMessage", error.message, "error"); }
+    });
+
+    $("clearStaleButton").addEventListener("click", async () => { try { const result = await api("/api/clear-stale", { method: "POST", body: "{}" }); message("activityMessage", `Removed ${result.count} stale queue entr${result.count === 1 ? "y" : "ies"}.`, "success"); refreshActivity(); } catch (error) { message("activityMessage", error.message, "error"); } });
+    $("archiveDataButton").addEventListener("click", async () => { if (!confirm("Archive the current queue, results, heartbeat, and logs? Settings will be preserved.")) return; try { const result = await api("/api/archive-data", { method: "POST", body: "{}" }); message("activityMessage", `Archived ${result.moved.length} items to ${result.archive}`, "success"); refreshActivity(); } catch (error) { message("activityMessage", error.message, "error"); } });
+
+    $("runToolButton").addEventListener("click", async () => {
+      const button = $("runToolButton"); let args;
+      try { args = JSON.parse($("toolArgs").value || "{}"); } catch { $("toolOutput").textContent = "Arguments must be valid JSON."; return; }
+      setBusy(button, true, "Waiting…");
+      try { const result = await api("/api/run-tool", { method: "POST", body: JSON.stringify({ command: $("toolSelect").value, args }) }); $("toolOutput").textContent = JSON.stringify(result, null, 2); }
+      catch (error) { $("toolOutput").textContent = error.message; } finally { setBusy(button, false); }
+    });
+
+    $("updateButton").addEventListener("click", async () => { const button = $("updateButton"); setBusy(button, true, "Checking…"); try { const result = await api("/api/update-check", { method: "POST", body: "{}" }); const text = result.updateAvailable ? (result.localCheckout ? `Published npm version: ${result.latest}; this local checkout reports ${result.current} and may contain unpublished changes. Review before replacing it.` : `Update available: ${result.current} → ${result.latest}. Run npm install -g after-effects-mcp@latest, then reopen this dashboard.`) : `You are current at ${result.current}.`; message("maintenanceMessage", text, result.updateAvailable ? "" : "success"); } catch (error) { message("maintenanceMessage", error.message, "error"); } finally { setBusy(button, false); } });
+
+    $("diagnosticsButton").addEventListener("click", async () => {
+      try { const response = await fetch("/api/diagnostics", { headers: { "X-Setup-Token": token } }); if (!response.ok) throw new Error("Could not generate diagnostics."); const blob = await response.blob(); const link = document.createElement("a"); link.href = URL.createObjectURL(blob); link.download = `after-effects-mcp-diagnostics-${Date.now()}.json`; link.click(); URL.revokeObjectURL(link.href); message("maintenanceMessage", "Sanitized diagnostics downloaded.", "success"); }
+      catch (error) { message("maintenanceMessage", error.message, "error"); }
+    });
+
+    $("closeButton").addEventListener("click", async () => { try { await api("/api/shutdown", { method: "POST", body: "{}" }); document.body.innerHTML = '<main><section class="panel"><h2>Setup server closed</h2><p class="subtle">You can close this tab.</p></section></main>'; } catch { window.close(); } });
+
+    activateMainTab(location.hash.slice(1) || "setup", false);
+    refresh();
+    setInterval(refreshActivity, 2500);
+  </script>
+</body>
+</html>

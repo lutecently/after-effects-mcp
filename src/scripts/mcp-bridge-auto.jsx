@@ -1756,8 +1756,12 @@ var autoRunCheckbox = panel.add("checkbox", undefined, "Auto-run commands");
 autoRunCheckbox.value = true;
 
 // Check interval (ms)
-var checkInterval = 2000;
+var initialBridgeSettings = readBridgeSettings();
+autoRunCheckbox.value = initialBridgeSettings.autoRun !== false;
+var checkInterval = clampNumber(initialBridgeSettings.pollIntervalMs, 250, 30000, 2000);
 var isChecking = false;
+var lastHeartbeatCommand = null;
+var lastHeartbeatStatus = "idle";
 
 // Command file path - use Documents folder for reliable access
 function getCommandFilePath() {
@@ -1784,12 +1788,62 @@ function getResultFilePath() {
 // clients can share the bridge without overwriting each other. The old single ae_command.json /
 // ae_mcp_result.json pair still works for clients that have not moved over.
 function getBridgeSubfolder(name) {
-    var folder = new Folder(Folder.myDocuments.fsName + "/ae-mcp-bridge/" + name);
+    var folder = new Folder(getBridgeRootFolder().fsName + "/" + name);
     if (!folder.exists) { folder.create(); }
     return folder;
 }
 function getQueueFolder() { return getBridgeSubfolder("queue"); }
 function getResultsFolder() { return getBridgeSubfolder("results"); }
+
+function getBridgeRootFolder() {
+    var folder = new Folder(Folder.myDocuments.fsName + "/ae-mcp-bridge");
+    if (!folder.exists) { folder.create(); }
+    return folder;
+}
+
+function clampNumber(value, min, max, fallback) {
+    var number = Number(value);
+    return isFinite(number) ? Math.max(min, Math.min(max, number)) : fallback;
+}
+
+function readBridgeSettings() {
+    var defaults = {
+        safetyMode: "full",
+        autoRun: true,
+        autoBackupHighImpact: true,
+        pollIntervalMs: 2000,
+        commandExpiryMs: 600000,
+        resultRetention: 100,
+        maxCommandsPerTick: 10
+    };
+    try {
+        var file = new File(Folder.myDocuments.fsName + "/ae-mcp-bridge/settings.json");
+        if (!file.exists || !file.open("r")) { return defaults; }
+        var text = file.read();
+        file.close();
+        var parsed = JSON.parse(text);
+        for (var key in parsed) { if (parsed.hasOwnProperty(key)) { defaults[key] = parsed[key]; } }
+    } catch (e) {}
+    return defaults;
+}
+
+function writeHeartbeat() {
+    try {
+        var queue = getQueueFolder().getFiles("*.json");
+        var payload = {
+            timestamp: isoTimestamp(new Date()),
+            aeVersion: app.version,
+            bridgeVersion: BRIDGE_VERSION,
+            autoRun: !!autoRunCheckbox.value,
+            queueDepth: queue ? queue.length : 0,
+            lastCommand: lastHeartbeatCommand,
+            lastStatus: lastHeartbeatStatus,
+            safetyMode: readBridgeSettings().safetyMode || "full"
+        };
+        try { payload.project = projectStatus(); } catch (e1) {}
+        writeTextFile(getBridgeRootFolder().fsName + "/status.json", JSON.stringify(payload, null, 2));
+    } catch (e) {}
+}
 
 function writeTextFile(path, text) {
     var f = new File(path);
@@ -1802,10 +1856,11 @@ function writeTextFile(path, text) {
 // Keep only the newest 100 per-command results
 function pruneResults() {
     try {
+        var retention = clampNumber(readBridgeSettings().resultRetention, 10, 5000, 100);
         var files = getResultsFolder().getFiles("*.json");
-        if (!files || files.length <= 100) { return; }
+        if (!files || files.length <= retention) { return; }
         files.sort(function (a, b) { return a.modified.getTime() - b.modified.getTime(); });
-        for (var i = 0; i < files.length - 100; i++) { try { files[i].remove(); } catch (e1) {} }
+        for (var i = 0; i < files.length - retention; i++) { try { files[i].remove(); } catch (e1) {} }
     } catch (e) {}
 }
 
@@ -1828,11 +1883,14 @@ function writeResultFiles(resultString, id) {
 
 // Run queued commands oldest-first (up to 10 per tick). Returns how many ran.
 function processQueue() {
+    var settings = readBridgeSettings();
+    var maxPerTick = clampNumber(settings.maxCommandsPerTick, 1, 100, 10);
+    var expiryMs = clampNumber(settings.commandExpiryMs, 10000, 86400000, 600000);
     var files = getQueueFolder().getFiles("*.json");
     if (!files || files.length === 0) { return 0; }
     files.sort(function (a, b) { return a.name < b.name ? -1 : (a.name > b.name ? 1 : 0); });
     var handled = 0;
-    for (var i = 0; i < files.length && handled < 10; i++) {
+    for (var i = 0; i < files.length && handled < maxPerTick; i++) {
         var qf = files[i];
         var data = null;
         try {
@@ -1853,8 +1911,8 @@ function processQueue() {
             try { qf.remove(); } catch (e1) {}
             continue;
         }
-        if (new Date().getTime() - qf.modified.getTime() > 10 * 60 * 1000) {
-            writeResultFiles(JSON.stringify({ status: "error", message: "Command expired in the queue: it waited more than 10 minutes for After Effects to process it", _commandId: id, _commandExecuted: data.command }), id);
+        if (new Date().getTime() - qf.modified.getTime() > expiryMs) {
+            writeResultFiles(JSON.stringify({ status: "error", message: "Command expired in the queue before After Effects processed it", _commandId: id, _commandExecuted: data.command }), id);
             try { qf.remove(); } catch (e2) {}
             continue;
         }
@@ -2277,6 +2335,29 @@ var readOnlyCommands = {
     getProjectInfo: 1, listCompositions: 1, getLayerInfo: 1, getKeyframes: 1, getProjectStatus: 1,
     getRenderStatus: 1, exportFrame: 1, getMarkers: 1, listLayerProperties: 1, getProjectTree: 1, openComp: 1, getCapabilities: 1, getPropertyReference: 1, backupProject: 1, getSelection: 1, setSelection: 1, setCurrentTime: 1, listEffects: 1, listFonts: 1, listRenderTemplates: 1, "test-animation": 1, bridgeTestEffects: 1
 };
+
+// Stricter set used by the dashboard's read-only safety mode. Commands that alter selection, write files, or create
+// test content are intentionally excluded even when they do not modify the project itself.
+var strictReadOnlyCommands = {
+    getProjectInfo: 1, listCompositions: 1, getLayerInfo: 1, getKeyframes: 1, getProjectStatus: 1,
+    getRenderStatus: 1, getMarkers: 1, listLayerProperties: 1, getProjectTree: 1, getCapabilities: 1,
+    getPropertyReference: 1, getSelection: 1, listEffects: 1, listFonts: 1, listRenderTemplates: 1
+};
+var highImpactCommands = { openProject: 1, newProject: 1, startRender: 1 };
+// Commands that can replace project state, remove multiple project items, or commit a render. When enabled,
+// preserve the last saved project file before they run. This intentionally does not save unsaved edits in place.
+var automaticBackupCommands = { openProject: 1, newProject: 1, deleteProjectItems: 1, startRender: 1 };
+
+function commandPolicyError(command) {
+    var mode = String(readBridgeSettings().safetyMode || "full");
+    if (mode === "read-only" && !strictReadOnlyCommands[command]) {
+        return "Blocked by read-only safety mode. Change the safety mode in the After Effects MCP setup dashboard to run this command.";
+    }
+    if (mode === "editing" && highImpactCommands[command]) {
+        return "Blocked by standard editing safety mode because this command can replace a project or start a render.";
+    }
+    return null;
+}
 
 function resultIsError(resultString) {
     return /"status"\s*:\s*"error"|"success"\s*:\s*false|"error"\s*:/.test(String(resultString));
@@ -3493,10 +3574,15 @@ function addExpressionControl(args) {
             if (typeof param.setPropertyParameters !== "function") { throw new Error("This version of After Effects cannot set dropdown items from a script"); }
             var items = [];
             for (var i = 0; i < args.options.length; i++) { items.push(String(args.options[i])); }
+            var addedIndex = added.propertyIndex;
             param.setPropertyParameters(items);
-            // Changing the menu rebuilds the effect, which invalidates the handles above: find them again
-            added = parade.property(String(args.name));
+            // Changing the menu rebuilds the effect and can invalidate every handle in the
+            // indexed Effects group. Reacquire the group and effect by the stable index.
+            parade = layer.property("ADBE Effect Parade");
+            added = parade ? parade.property(addedIndex) : null;
+            if (!added) { throw new Error("After Effects rebuilt the dropdown control but it could not be found again"); }
             param = findPropertyInsideGroup(added, def.param) || added.property(1);
+            if (!param) { throw new Error("After Effects rebuilt the dropdown control without a menu parameter"); }
         }
         if (isSet(args.value)) { param.setValue(normalizeValue(param, args.value)); }
         return JSON.stringify({
@@ -3624,12 +3710,14 @@ function backupProject(args) {
         var folder = args.folder ? new Folder(args.folder) : getBridgeSubfolder("backups");
         if (!folder.exists) { throw new Error("Folder does not exist: " + folder.fsName); }
         var d = new Date();
-        var stamp = d.getFullYear() + padTwo(d.getMonth() + 1) + padTwo(d.getDate()) + "-" + padTwo(d.getHours()) + padTwo(d.getMinutes()) + padTwo(d.getSeconds());
+        var millis = String(d.getMilliseconds());
+        while (millis.length < 3) { millis = "0" + millis; }
+        var stamp = d.getFullYear() + padTwo(d.getMonth() + 1) + padTwo(d.getDate()) + "-" + padTwo(d.getHours()) + padTwo(d.getMinutes()) + padTwo(d.getSeconds()) + "-" + millis;
         var base = decodeURI(proj.file.name).replace(/\.aepx?$/i, "");
         var label = args.label ? "-" + String(args.label).replace(/[^A-Za-z0-9_\-]+/g, "_") : "";
         var ext = /\.aepx$/i.test(proj.file.name) ? ".aepx" : ".aep";
         var target = new File(folder.fsName + "/" + base + "-" + stamp + label + ext);
-        if (target.exists) { throw new Error("Backup already exists: " + target.fsName + " (try again in a second)"); }
+        if (target.exists) { throw new Error("Backup already exists: " + target.fsName + " (try again)"); }
         if (!proj.file.copy(target.fsName)) { throw new Error("Could not copy the project file to " + target.fsName); }
         return JSON.stringify({ status: "success", message: args.saveFirst ? "Project saved, then backed up" : "Backed up the last saved state (unsaved changes are not included)", path: target.fsName, bytes: target.length, source: proj.file.fsName, savedFirst: !!args.saveFirst }, null, 2);
     } catch (error) { return fail(error); }
@@ -3720,14 +3808,40 @@ var commandTable = {
 // Execute command
 function executeCommand(command, args, id) {
     var result = "";
+    var automaticBackupPath = null;
 
     logToPanel("Executing command: " + command);
+    lastHeartbeatCommand = command;
+    lastHeartbeatStatus = "running";
+    writeHeartbeat();
     statusText.text = "Running: " + command;
     panel.update();
 
     try {
         logToPanel("Attempting to execute: " + command); // Log before switch
-        // Use a switch statement for clarity
+        var policyError = commandPolicyError(command);
+        if (policyError) {
+            result = JSON.stringify({ status: "error", error: "Command blocked", message: policyError, safetyMode: readBridgeSettings().safetyMode || "full" });
+        } else {
+        var bridgeSettings = readBridgeSettings();
+        if (bridgeSettings.autoBackupHighImpact !== false && automaticBackupCommands[command]) {
+            logToPanel("Creating automatic backup before: " + command);
+            var backupResult = backupProject({ label: "auto-before-" + command, saveFirst: false });
+            if (resultIsError(backupResult)) {
+                var backupMessage = "Automatic backup failed. The command was not run.";
+                try {
+                    var backupError = JSON.parse(backupResult);
+                    backupMessage += " " + (backupError.message || backupError.error || "Save the project first, then retry.");
+                } catch (backupParseError) {
+                    backupMessage += " " + String(backupResult);
+                }
+                result = JSON.stringify({ status: "error", error: "Automatic backup failed", message: backupMessage, command: command });
+            } else {
+                try { automaticBackupPath = JSON.parse(backupResult).path || null; } catch (backupPathError) {}
+                logToPanel("Automatic backup created: " + automaticBackupPath);
+            }
+        }
+        if (!result) {
         // One undo step per bridge command, except commands that replace the project, undo, or block on a render
         var noUndoGroup = { undo: 1, openProject: 1, newProject: 1, saveProject: 1, startRender: 1, backupProject: 1 };
         var useUndoGroup = !noUndoGroup[command];
@@ -3750,6 +3864,8 @@ function executeCommand(command, args, id) {
             undoStack.push(command);
             if (undoStack.length > 50) { undoStack.shift(); }
         }
+        }
+        }
         logToPanel("Execution finished for: " + command); // Log after switch
         
         // Save the result (ensure result is always a string)
@@ -3763,9 +3879,11 @@ function executeCommand(command, args, id) {
             resultObj._commandExecuted = command;
             if (id) { resultObj._commandId = id; }
             resultObj._bridgeVersion = BRIDGE_VERSION;
+            if (automaticBackupPath) { resultObj._automaticBackup = automaticBackupPath; }
             try { resultObj._project = projectStatus(); } catch (ctxError) {}
             resultObj._responseTimestamp = isoTimestamp(new Date());
             resultString = JSON.stringify(resultObj, null, 2);
+            lastHeartbeatStatus = resultIsError(resultString) ? "error" : "success";
             logToPanel("Added timestamp to result JSON for tracking freshness.");
         } catch (parseError) {
             // If it's not valid JSON, append the timestamp as a comment
@@ -3774,6 +3892,7 @@ function executeCommand(command, args, id) {
         }
         
         writeResultFiles(resultString, id);
+        writeHeartbeat();
         logToPanel("Result file write process complete.");
         
         logToPanel("Command completed successfully: " + command); // Changed log message
@@ -3785,6 +3904,7 @@ function executeCommand(command, args, id) {
         logToPanel("Command status updated.");
         
     } catch (error) {
+        lastHeartbeatStatus = "error";
         var errorMsg = "ERROR in executeCommand for '" + command + "': " + error.toString() + (error.line ? " (line: " + error.line + ")" : "");
         logToPanel(errorMsg); // Log detailed error
         statusText.text = "Error: " + error.toString();
@@ -3802,7 +3922,8 @@ function executeCommand(command, args, id) {
                 _commandExecuted: command,
                 _bridgeVersion: BRIDGE_VERSION
             });
-            writeResultFiles(errorResult, id);
+        writeResultFiles(errorResult, id);
+        writeHeartbeat();
             logToPanel("Successfully wrote ERROR to result file.");
         } catch (writeError) {
              logToPanel("CRITICAL ERROR: Failed to write error to result file: " + writeError.toString());
@@ -3842,6 +3963,14 @@ function updateCommandStatus(status) {
 function logToPanel(message) {
     var timestamp = new Date().toLocaleTimeString();
     logText.text = timestamp + ": " + message + "\n" + logText.text;
+    try {
+        var logFile = new File(getBridgeRootFolder().fsName + "/bridge.log");
+        logFile.encoding = "UTF-8";
+        if (logFile.open("a")) {
+            logFile.writeln(isoTimestamp(new Date()) + " " + message);
+            logFile.close();
+        }
+    } catch (e) {}
 }
 
 // Check for new commands
@@ -3875,6 +4004,7 @@ function checkForCommands() {
                 }
             }
         }
+        writeHeartbeat();
     } catch (e) {
         logToPanel("Error checking for commands: " + e.toString());
     }
@@ -3898,6 +4028,7 @@ checkButton.onClick = function() {
 logToPanel("MCP Bridge Auto started");
 logToPanel("Command file: " + getCommandFilePath());
 statusText.text = "Ready - Auto-run is " + (autoRunCheckbox.value ? "ON" : "OFF");
+writeHeartbeat();
 
 // Start the command checker
 startCommandChecker();
@@ -3905,4 +4036,3 @@ startCommandChecker();
 // Show the panel
 panel.center();
 panel.show();
-
