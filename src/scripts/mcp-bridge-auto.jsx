@@ -53,8 +53,8 @@ function createTextLayer(args) {
             if (item instanceof CompItem && item.name === compName) { comp = item; break; }
         }
         if (!comp) {
-            if (app.project.activeItem instanceof CompItem) { comp = app.project.activeItem; } 
-            else { throw new Error("No composition found with name '" + compName + "' and no active composition"); }
+            if (!compName && app.project.activeItem instanceof CompItem) { comp = app.project.activeItem; } 
+            else { throw new Error(compName ? "Composition not found: '" + compName + "'" : "No compName given and no active composition"); }
         }
         var textLayer = comp.layers.addText(text);
         var textProp = textLayer.property("ADBE Text Properties").property("ADBE Text Document");
@@ -98,8 +98,8 @@ function createShapeLayer(args) {
             if (item instanceof CompItem && item.name === compName) { comp = item; break; }
         }
         if (!comp) {
-            if (app.project.activeItem instanceof CompItem) { comp = app.project.activeItem; } 
-            else { throw new Error("No composition found with name '" + compName + "' and no active composition"); }
+            if (!compName && app.project.activeItem instanceof CompItem) { comp = app.project.activeItem; } 
+            else { throw new Error(compName ? "Composition not found: '" + compName + "'" : "No compName given and no active composition"); }
         }
         var shapeLayer = comp.layers.addShape();
         shapeLayer.name = name;
@@ -157,8 +157,8 @@ function createCamera(args) {
             if (item instanceof CompItem && item.name === compName) { comp = item; break; }
         }
         if (!comp) {
-            if (app.project.activeItem instanceof CompItem) { comp = app.project.activeItem; }
-            else { throw new Error("No composition found with name '" + compName + "' and no active composition"); }
+            if (!compName && app.project.activeItem instanceof CompItem) { comp = app.project.activeItem; }
+            else { throw new Error(compName ? "Composition not found: '" + compName + "'" : "No compName given and no active composition"); }
         }
 
         var centerPoint = [comp.width / 2, comp.height / 2];
@@ -212,8 +212,8 @@ function duplicateLayer(args) {
             if (item instanceof CompItem && item.name === compName) { comp = item; break; }
         }
         if (!comp) {
-            if (app.project.activeItem instanceof CompItem) { comp = app.project.activeItem; }
-            else { throw new Error("No composition found with name '" + compName + "' and no active composition"); }
+            if (!compName && app.project.activeItem instanceof CompItem) { comp = app.project.activeItem; }
+            else { throw new Error(compName ? "Composition not found: '" + compName + "'" : "No compName given and no active composition"); }
         }
 
         var layer = null;
@@ -254,8 +254,8 @@ function deleteLayer(args) {
             if (item instanceof CompItem && item.name === compName) { comp = item; break; }
         }
         if (!comp) {
-            if (app.project.activeItem instanceof CompItem) { comp = app.project.activeItem; }
-            else { throw new Error("No composition found with name '" + compName + "' and no active composition"); }
+            if (!compName && app.project.activeItem instanceof CompItem) { comp = app.project.activeItem; }
+            else { throw new Error(compName ? "Composition not found: '" + compName + "'" : "No compName given and no active composition"); }
         }
 
         var layer = null;
@@ -304,8 +304,8 @@ function setLayerMask(args) {
             if (item instanceof CompItem && item.name === compName) { comp = item; break; }
         }
         if (!comp) {
-            if (app.project.activeItem instanceof CompItem) { comp = app.project.activeItem; }
-            else { throw new Error("No composition found with name '" + compName + "' and no active composition"); }
+            if (!compName && app.project.activeItem instanceof CompItem) { comp = app.project.activeItem; }
+            else { throw new Error(compName ? "Composition not found: '" + compName + "'" : "No compName given and no active composition"); }
         }
 
         var layer = null;
@@ -427,8 +427,8 @@ function createSolidLayer(args) {
             if (item instanceof CompItem && item.name === compName) { comp = item; break; }
         }
         if (!comp) {
-            if (app.project.activeItem instanceof CompItem) { comp = app.project.activeItem; } 
-            else { throw new Error("No composition found with name '" + compName + "' and no active composition"); }
+            if (!compName && app.project.activeItem instanceof CompItem) { comp = app.project.activeItem; } 
+            else { throw new Error(compName ? "Composition not found: '" + compName + "'" : "No compName given and no active composition"); }
         }
         if (!size) { size = [comp.width, comp.height]; }
         var solidLayer;
@@ -478,8 +478,8 @@ function setLayerProperties(args) {
             if (item instanceof CompItem && item.name === compName) { comp = item; break; }
         }
         if (!comp) {
-            if (app.project.activeItem instanceof CompItem) { comp = app.project.activeItem; } 
-            else { throw new Error("No composition found with name '" + compName + "' and no active composition"); }
+            if (!compName && app.project.activeItem instanceof CompItem) { comp = app.project.activeItem; } 
+            else { throw new Error(compName ? "Composition not found: '" + compName + "'" : "No compName given and no active composition"); }
         }
         
         // Find the layer (same logic as before)
@@ -682,8 +682,8 @@ function batchSetLayerProperties(args) {
             if (item instanceof CompItem && item.name === compName) { comp = item; break; }
         }
         if (!comp) {
-            if (app.project.activeItem instanceof CompItem) { comp = app.project.activeItem; }
-            else { throw new Error("No composition found with name '" + compName + "' and no active composition"); }
+            if (!compName && app.project.activeItem instanceof CompItem) { comp = app.project.activeItem; }
+            else { throw new Error(compName ? "Composition not found: '" + compName + "'" : "No compName given and no active composition"); }
         }
 
         var results = [];
@@ -1194,16 +1194,10 @@ function applyEffectTemplate(args) {
 
 // Find a comp by name. Same fallback rule as the older commands: use the active comp if not found.
 function resolveComp(compName) {
-    var comp = null;
-    for (var i = 1; i <= app.project.numItems; i++) {
-        var item = app.project.item(i);
-        if (item instanceof CompItem && item.name === compName) { comp = item; break; }
-    }
-    if (!comp) {
-        if (app.project.activeItem instanceof CompItem) { comp = app.project.activeItem; }
-        else { throw new Error("No composition found with name '" + compName + "' and no active composition"); }
-    }
-    return comp;
+    // A name that is given must exist; only an empty name means "the active comp".
+    if (compName) { return findCompByNameStrict(compName); }
+    if (app.project.activeItem instanceof CompItem) { return app.project.activeItem; }
+    throw new Error("No compName given and no active composition");
 }
 
 // Find a comp by exact name only (no active-comp fallback). Used when a comp is the *subject* of the command.
@@ -1428,7 +1422,9 @@ function setLayerParent(args) {
             }
             var parentLayer = resolveLayer(comp, args.parentLayerIndex, args.parentLayerName || "");
             if (parentLayer.index === layer.index) { throw new Error("A layer cannot be its own parent"); }
-            if (args.keepTransform) { layer.setParentWithJump(parentLayer); }
+            // keepTransform (default true): the layer stays where it is on screen; its local values are rewritten
+            // relative to the parent. keepTransform false keeps the raw values, so the layer may jump.
+            if (args.keepTransform === false) { layer.setParentWithJump(parentLayer); }
             else { layer.parent = parentLayer; }
         }
 
@@ -1791,8 +1787,8 @@ function setCompositionProperties(args) {
             if (item instanceof CompItem && item.name === compName) { comp = item; break; }
         }
         if (!comp) {
-            if (app.project.activeItem instanceof CompItem) { comp = app.project.activeItem; }
-            else { throw new Error("No composition found with name '" + compName + "' and no active composition"); }
+            if (!compName && app.project.activeItem instanceof CompItem) { comp = app.project.activeItem; }
+            else { throw new Error(compName ? "Composition not found: '" + compName + "'" : "No compName given and no active composition"); }
         }
         var changed = [];
         if (args.duration !== undefined && args.duration !== null) { comp.duration = args.duration; changed.push("duration"); }
@@ -1969,6 +1965,317 @@ function getLayerInfo(args) {
     }
 }
 
+// Find a layer property by name: inside a named effect, else Transform, else anywhere on the layer.
+function findLayerProperty(layer, propertyName, effectName) {
+    if (effectName) {
+        var eff = findEffectOnLayer(layer, effectName);
+        if (!eff) { return null; }
+        return findPropertyInsideGroup(eff, propertyName);
+    }
+    var transform = layer.property("Transform");
+    var prop = transform ? transform.property(propertyName) : null;
+    if (prop) { return prop; }
+    prop = layer.property(propertyName);
+    if (prop && prop.propertyType === PropertyType.PROPERTY) { return prop; }
+    return findPropertyInsideGroup(layer, propertyName);
+}
+
+function interpolationName(type) {
+    if (type === KeyframeInterpolationType.LINEAR) { return "linear"; }
+    if (type === KeyframeInterpolationType.BEZIER) { return "bezier"; }
+    if (type === KeyframeInterpolationType.HOLD) { return "hold"; }
+    return "unknown";
+}
+
+function easeToArray(eases) {
+    var out = [];
+    for (var i = 0; i < eases.length; i++) { out.push({ speed: eases[i].speed, influence: eases[i].influence }); }
+    return out;
+}
+
+// --- getKeyframes: list the keyframes on a property ---
+// {compName|compIndex?, layerIndex|layerName, propertyName, effectName?}
+function getKeyframes(args) {
+    try {
+        var target = resolveTarget(args);
+        if (!args.propertyName) { throw new Error("propertyName is required"); }
+        var prop = findLayerProperty(target.layer, args.propertyName, args.effectName);
+        if (!prop) { throw new Error("Property '" + args.propertyName + "' not found on layer '" + target.layer.name + "'"); }
+
+        var keys = [];
+        for (var k = 1; k <= prop.numKeys; k++) {
+            var keyValue = null;
+            try { keyValue = prop.keyValue(k); } catch (e0) {}
+            var key = {
+                index: k,
+                time: prop.keyTime(k),
+                value: keyValue,
+                inInterpolation: interpolationName(prop.keyInInterpolationType(k)),
+                outInterpolation: interpolationName(prop.keyOutInterpolationType(k))
+            };
+            try { key.inEase = easeToArray(prop.keyInTemporalEase(k)); key.outEase = easeToArray(prop.keyOutTemporalEase(k)); } catch (e1) {}
+            keys.push(key);
+        }
+        return JSON.stringify({
+            status: "success",
+            layer: { name: target.layer.name, index: target.layer.index },
+            property: { name: prop.name, matchName: prop.matchName, numKeyframes: prop.numKeys, value: safePropertyValue(prop), expressionEnabled: prop.expressionEnabled, expression: prop.expressionEnabled ? prop.expression : null },
+            keyframes: keys
+        }, null, 2);
+    } catch (error) {
+        return JSON.stringify({ status: "error", message: error.toString() }, null, 2);
+    }
+}
+
+// --- removeKeyframes: delete keyframes from a property ---
+// {compName|compIndex?, layerIndex|layerName, propertyName, effectName?} plus ONE of: all (true), keyIndices [..], time (seconds)
+function removeKeyframes(args) {
+    try {
+        var target = resolveTarget(args);
+        if (!args.propertyName) { throw new Error("propertyName is required"); }
+        var prop = findLayerProperty(target.layer, args.propertyName, args.effectName);
+        if (!prop) { throw new Error("Property '" + args.propertyName + "' not found on layer '" + target.layer.name + "'"); }
+
+        var hasTime = args.time !== undefined && args.time !== null;
+        var hasIndices = args.keyIndices && args.keyIndices.length > 0;
+        if (!args.all && !hasTime && !hasIndices) { throw new Error("Specify one of: all (true), keyIndices, or time"); }
+
+        var before = prop.numKeys;
+        var indices = [];
+        if (args.all) { for (var a = 1; a <= before; a++) { indices.push(a); } }
+        else if (hasTime) {
+            if (before === 0) { throw new Error("Property has no keyframes"); }
+            var nearest = prop.nearestKeyIndex(args.time);
+            var tolerance = target.comp.frameDuration / 2;
+            if (Math.abs(prop.keyTime(nearest) - args.time) > tolerance) {
+                throw new Error("No keyframe at " + args.time + "s (nearest is #" + nearest + " at " + prop.keyTime(nearest) + "s)");
+            }
+            indices.push(nearest);
+        }
+        else { indices = args.keyIndices.slice(0); }
+
+        for (var c = 0; c < indices.length; c++) {
+            if (indices[c] < 1 || indices[c] > before) { throw new Error("Keyframe index out of range: " + indices[c] + " (property has " + before + ")"); }
+        }
+        indices.sort(function (x, y) { return y - x; }); // delete from the end so indices stay valid
+        for (var d = 0; d < indices.length; d++) {
+            if (d > 0 && indices[d] === indices[d - 1]) { continue; }
+            prop.removeKey(indices[d]);
+        }
+        return JSON.stringify({
+            status: "success", message: "Keyframes removed",
+            layer: { name: target.layer.name, index: target.layer.index },
+            property: { name: prop.name, keyframesBefore: before, keyframesAfter: prop.numKeys }
+        }, null, 2);
+    } catch (error) {
+        return JSON.stringify({ status: "error", message: error.toString() }, null, 2);
+    }
+}
+
+// --- removeEffect: delete an effect from a layer ---
+// {compName|compIndex?, layerIndex|layerName, effectName|effectIndex}
+function removeEffect(args) {
+    try {
+        var target = resolveTarget(args);
+        var effectRef = null;
+        if (args.effectIndex !== undefined && args.effectIndex !== null) { effectRef = args.effectIndex; }
+        else if (args.effectName) { effectRef = args.effectName; }
+        else { throw new Error("Provide effectName or effectIndex"); }
+        var effect = findEffectOnLayer(target.layer, effectRef);
+        if (!effect) { throw new Error("Effect not found on layer '" + target.layer.name + "': " + effectRef); }
+        var name = effect.name, matchName = effect.matchName;
+        effect.remove();
+        return JSON.stringify({
+            status: "success", message: "Effect removed (expressions that referenced it will now error)",
+            effect: { name: name, matchName: matchName },
+            layer: { name: target.layer.name, index: target.layer.index }
+        }, null, 2);
+    } catch (error) {
+        return JSON.stringify({ status: "error", message: error.toString() }, null, 2);
+    }
+}
+
+// --- Project control ---
+function projectStatus() {
+    var proj = app.project;
+    var active = (proj.activeItem instanceof CompItem) ? { name: proj.activeItem.name, id: proj.activeItem.id } : null;
+    return {
+        name: proj.file ? decodeURI(proj.file.name) : null,
+        path: proj.file ? proj.file.fsName : null,
+        numItems: proj.numItems,
+        activeComp: active
+    };
+}
+
+function getProjectStatus() {
+    try {
+        var st = projectStatus();
+        st.status = "success";
+        st.saved = !!app.project.file;
+        return JSON.stringify(st, null, 2);
+    } catch (error) {
+        return JSON.stringify({ status: "error", message: error.toString() }, null, 2);
+    }
+}
+
+// {path?, overwrite?}. Without a path, saves in place. With a path, saves a copy as the current project (Save As).
+function saveProject(args) {
+    try {
+        args = args || {};
+        if (args.path) {
+            var target = new File(args.path);
+            if (!target.parent || !target.parent.exists) { throw new Error("Folder does not exist: " + (target.parent ? target.parent.fsName : args.path)); }
+            var isCurrent = app.project.file && app.project.file.fsName === target.fsName;
+            if (target.exists && !isCurrent && !args.overwrite) { throw new Error("File already exists: " + target.fsName + " (set overwrite: true to replace it)"); }
+            app.project.save(target);
+        } else {
+            if (!app.project.file) { throw new Error("Project has never been saved; provide a path"); }
+            app.project.save();
+        }
+        return JSON.stringify({ status: "success", message: "Project saved", path: app.project.file ? app.project.file.fsName : null }, null, 2);
+    } catch (error) {
+        return JSON.stringify({ status: "error", message: error.toString() }, null, 2);
+    }
+}
+
+// Close the current project. saveCurrent must be an explicit boolean: closing otherwise would prompt (and block the bridge).
+function closeCurrentProject(saveCurrent) {
+    if (saveCurrent === true) {
+        if (!app.project.file) { throw new Error("Current project has never been saved; saveProject with a path first, or pass saveCurrent: false to discard it"); }
+        app.project.close(CloseOptions.SAVE_CHANGES);
+    } else {
+        app.project.close(CloseOptions.DO_NOT_SAVE_CHANGES);
+    }
+}
+
+// {path, saveCurrent (required boolean)}. Replaces the open project.
+function openProject(args) {
+    try {
+        if (!args.path) { throw new Error("path is required"); }
+        if (typeof args.saveCurrent !== "boolean") { throw new Error("saveCurrent (true/false) is required: opening a project closes the current one"); }
+        var file = new File(args.path);
+        if (!file.exists) { throw new Error("File not found: " + file.fsName); }
+        closeCurrentProject(args.saveCurrent);
+        app.open(file);
+        var st = projectStatus();
+        st.status = "success";
+        st.message = "Project opened";
+        return JSON.stringify(st, null, 2);
+    } catch (error) {
+        return JSON.stringify({ status: "error", message: error.toString() }, null, 2);
+    }
+}
+
+// {saveCurrent (required boolean)}. Replaces the open project with an empty one.
+function newProject(args) {
+    try {
+        if (typeof args.saveCurrent !== "boolean") { throw new Error("saveCurrent (true/false) is required: a new project closes the current one"); }
+        closeCurrentProject(args.saveCurrent);
+        app.newProject();
+        var st = projectStatus();
+        st.status = "success";
+        st.message = "New project created";
+        return JSON.stringify(st, null, 2);
+    } catch (error) {
+        return JSON.stringify({ status: "error", message: error.toString() }, null, 2);
+    }
+}
+
+// Commands that change the project and run inside an undo group, newest last. Only the bridge's own commands are
+// undone, never the user's manual edits. Capped so it cannot grow without bound.
+var undoStack = [];
+var readOnlyCommands = {
+    getProjectInfo: 1, listCompositions: 1, getLayerInfo: 1, getKeyframes: 1, getProjectStatus: 1,
+    getRenderStatus: 1, "test-animation": 1, bridgeTestEffects: 1
+};
+
+function resultIsError(resultString) {
+    return /"status"\s*:\s*"error"|"success"\s*:\s*false|"error"\s*:/.test(String(resultString));
+}
+
+// {steps? (default 1, max 20)}. Undoes the last N bridge commands that changed the project.
+function undoCommand(args) {
+    try {
+        var steps = (args && args.steps) ? parseInt(args.steps, 10) : 1;
+        if (!(steps >= 1) || steps > 20) { throw new Error("steps must be between 1 and 20"); }
+        if (undoStack.length === 0) { throw new Error("Nothing to undo: no changing bridge commands have run since the panel opened"); }
+        var undone = [];
+        for (var i = 0; i < steps && undoStack.length > 0; i++) {
+            // Command 16 is Edit > Undo and does not depend on the install language. (Looking the menu item up by
+            // name returned the wrong command.) Each bridge command ran in one undo group, so one undo reverses it.
+            app.executeCommand(16);
+            undone.push(undoStack.pop());
+        }
+        var out = { status: "success", message: "Undid " + undone.length + " command(s)", undone: undone, remaining: undoStack.length };
+        return JSON.stringify(out, null, 2);
+    } catch (error) {
+        return JSON.stringify({ status: "error", message: error.toString() }, null, 2);
+    }
+}
+
+// --- Render queue ---
+function renderStatusName(status) {
+    if (status === RQItemStatus.WILL_CONTINUE) { return "will-continue"; }
+    if (status === RQItemStatus.NEEDS_OUTPUT) { return "needs-output"; }
+    if (status === RQItemStatus.UNQUEUED) { return "unqueued"; }
+    if (status === RQItemStatus.QUEUED) { return "queued"; }
+    if (status === RQItemStatus.RENDERING) { return "rendering"; }
+    if (status === RQItemStatus.USER_STOPPED) { return "user-stopped"; }
+    if (status === RQItemStatus.ERR_STOPPED) { return "error-stopped"; }
+    if (status === RQItemStatus.DONE) { return "done"; }
+    return "unknown";
+}
+
+function renderQueueItems() {
+    var rq = app.project.renderQueue;
+    var items = [];
+    for (var i = 1; i <= rq.numItems; i++) {
+        var it = rq.item(i);
+        var info = { index: i, composition: it.comp.name, status: renderStatusName(it.status), render: it.render, outputs: [] };
+        try { info.elapsedSeconds = it.elapsedSeconds; } catch (e1) {}
+        for (var o = 1; o <= it.numOutputModules; o++) {
+            try { info.outputs.push(it.outputModule(o).file ? it.outputModule(o).file.fsName : null); } catch (e2) { info.outputs.push(null); }
+        }
+        items.push(info);
+    }
+    return { rendering: rq.rendering, numItems: rq.numItems, items: items };
+}
+
+function getRenderStatus() {
+    try {
+        var st = renderQueueItems();
+        st.status = "success";
+        return JSON.stringify(st, null, 2);
+    } catch (error) {
+        return JSON.stringify({ status: "error", message: error.toString() }, null, 2);
+    }
+}
+
+// Renders everything queued. This BLOCKS After Effects (and this bridge) until the render finishes; the result is
+// written afterwards, so a long render will outlast the MCP server's wait. Check with getRenderStatus / get-results.
+function startRender() {
+    try {
+        var rq = app.project.renderQueue;
+        var queued = 0;
+        for (var i = 1; i <= rq.numItems; i++) { if (rq.item(i).status === RQItemStatus.QUEUED) { queued++; } }
+        if (queued === 0) { throw new Error("Nothing queued to render (use addToRenderQueue first)"); }
+        rq.render();
+        var st = renderQueueItems();
+        st.status = "success";
+        st.message = "Render finished (" + queued + " item(s) were queued)";
+        return JSON.stringify(st, null, 2);
+    } catch (error) {
+        return JSON.stringify({ status: "error", message: error.toString() }, null, 2);
+    }
+}
+
+// ExtendScript is ES3 and has no Date.prototype.toISOString
+function isoTimestamp(d) {
+    function pad(n, w) { var t = String(n); while (t.length < w) { t = "0" + t; } return t; }
+    return d.getUTCFullYear() + "-" + pad(d.getUTCMonth() + 1, 2) + "-" + pad(d.getUTCDate(), 2) + "T" +
+        pad(d.getUTCHours(), 2) + ":" + pad(d.getUTCMinutes(), 2) + ":" + pad(d.getUTCSeconds(), 2) + "." + pad(d.getUTCMilliseconds(), 3) + "Z";
+}
+
 // Execute command
 function executeCommand(command, args) {
     var result = "";
@@ -1980,6 +2287,11 @@ function executeCommand(command, args) {
     try {
         logToPanel("Attempting to execute: " + command); // Log before switch
         // Use a switch statement for clarity
+        // One undo step per bridge command, except commands that replace the project, undo, or block on a render
+        var noUndoGroup = { undo: 1, openProject: 1, newProject: 1, saveProject: 1, startRender: 1 };
+        var useUndoGroup = !noUndoGroup[command];
+        if (useUndoGroup) { app.beginUndoGroup("MCP: " + command); }
+        try {
         switch (command) {
             case "getProjectInfo":
                 result = getProjectInfo();
@@ -2120,8 +2432,45 @@ function executeCommand(command, args) {
                 result = addToRenderQueue(args);
                 logToPanel("Returned from addToRenderQueue.");
                 break;
+            case "getKeyframes":
+                result = getKeyframes(args);
+                break;
+            case "removeKeyframes":
+                result = removeKeyframes(args);
+                break;
+            case "removeEffect":
+                result = removeEffect(args);
+                break;
+            case "getProjectStatus":
+                result = getProjectStatus();
+                break;
+            case "saveProject":
+                result = saveProject(args);
+                break;
+            case "openProject":
+                result = openProject(args);
+                break;
+            case "newProject":
+                result = newProject(args);
+                break;
+            case "undo":
+                result = undoCommand(args);
+                break;
+            case "getRenderStatus":
+                result = getRenderStatus();
+                break;
+            case "startRender":
+                result = startRender();
+                break;
             default:
                 result = JSON.stringify({ error: "Unknown command: " + command });
+        }
+        } finally {
+            if (useUndoGroup) { app.endUndoGroup(); }
+        }
+        if (useUndoGroup && !readOnlyCommands[command] && !resultIsError(result)) {
+            undoStack.push(command);
+            if (undoStack.length > 50) { undoStack.shift(); }
         }
         logToPanel("Execution finished for: " + command); // Log after switch
         
@@ -2133,8 +2482,9 @@ function executeCommand(command, args) {
         try {
             var resultObj = JSON.parse(resultString);
             // Add a timestamp to help identify if we're getting fresh results
-            resultObj._responseTimestamp = new Date().toISOString();
             resultObj._commandExecuted = command;
+            try { resultObj._project = projectStatus(); } catch (ctxError) {}
+            resultObj._responseTimestamp = isoTimestamp(new Date());
             resultString = JSON.stringify(resultObj, null, 2);
             logToPanel("Added timestamp to result JSON for tracking freshness.");
         } catch (parseError) {

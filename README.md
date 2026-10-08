@@ -217,6 +217,15 @@ You can animate layers with:
 | `deleteLayer`               | Delete a layer                        |
 | `setLayerMask`              | Create/modify layer masks             |
 | `renameEffect`              | Rename an effect on a layer           |
+| `removeEffect`              | Remove an effect from a layer         |
+| `getKeyframes`              | List keyframes (time, value, interpolation, ease) on a property |
+| `removeKeyframes`           | Remove keyframes by index, time, or all |
+| `getProjectStatus`          | Project name/path, item count, active comp |
+| `saveProject`               | Save, or Save As a path (won't overwrite without `overwrite`) |
+| `openProject` / `newProject`| Replace the open project (`saveCurrent` must be stated) |
+| `undo`                      | Undo the last N bridge commands       |
+| `getRenderStatus`           | Render queue status and output paths  |
+| `startRender`               | Render the queue (blocks After Effects until done) |
 
 ## 👨‍💻 For Developers
 

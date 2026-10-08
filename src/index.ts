@@ -35,6 +35,25 @@ function getAETempDir(): string {
 
 // Headless CLI execution has been removed. All interactions are routed through the Bridge panel.
 
+// The bridge stamps every result with the open project (_project). If the project's file changes between results
+// (After Effects restarted, or someone opened another project), add a warning so stale comp/layer assumptions get caught.
+let lastProjectKey: string | null = null;
+function annotateProjectChange(content: string): string {
+  try {
+    const parsed = JSON.parse(content);
+    const project = parsed && parsed._project;
+    if (!project) return content;
+    const key = `${project.path ?? "(unsaved)"}`;
+    if (lastProjectKey !== null && key !== lastProjectKey) {
+      parsed._warning = `The open After Effects project changed since the last result (was ${lastProjectKey}, now ${key}). Comps and layers created earlier may not exist; re-check with getProjectStatus / listCompositions.`;
+    }
+    lastProjectKey = key;
+    return JSON.stringify(parsed, null, 2);
+  } catch {
+    return content;
+  }
+}
+
 // Helper function to read results from After Effects temp file
 function readResultsFromTempFile(): string {
   try {
@@ -63,7 +82,7 @@ function readResultsFromTempFile(): string {
         });
       }
       
-      return content;
+      return annotateProjectChange(content);
     } else {
       console.error(`Result file not found at: ${tempFilePath}`);
       return JSON.stringify({ error: "No results file found. Please run a script in After Effects first." });
@@ -89,7 +108,7 @@ async function waitForBridgeResult(expectedCommand?: string, timeoutMs: number =
           try {
             const parsed = JSON.parse(content);
             if (!expectedCommand || parsed._commandExecuted === expectedCommand) {
-              return content;
+              return annotateProjectChange(content);
             }
           } catch {
             // not JSON yet; continue polling
@@ -200,6 +219,16 @@ server.tool(
       "importFile",
       "setEffectProperty",
       "renameEffect",
+      "removeEffect",
+      "getKeyframes",
+      "removeKeyframes",
+      "getProjectStatus",
+      "saveProject",
+      "openProject",
+      "newProject",
+      "undo",
+      "getRenderStatus",
+      "startRender",
       "addToRenderQueue"
     ];
     
@@ -384,10 +413,20 @@ Layer/comp management scripts (run via run-script; comps are found by compName, 
 - addCompToComp: {compName (target), sourceCompName, opacity?, position?}
 - setGuideLayer: {compName, layerIndex|layerName, guideLayer (default true)}
 - createNullLayer: {compName, name?, position? (default comp centre), duration?}
-- setLayerParent: {compName, layerIndex|layerName, parentLayerIndex|parentLayerName, keepTransform?} or {..., clearParent: true}
+- setLayerParent: {compName, layerIndex|layerName, parentLayerIndex|parentLayerName, keepTransform? (default true: the layer stays where it is on screen; false keeps its raw values so it may jump)} or {..., clearParent: true}
 - moveLayer: {compName, layerIndex|layerName} plus ONE of: moveTo ("top"|"bottom"), toIndex, aboveLayerIndex|aboveLayerName, belowLayerIndex|belowLayerName
 - importFile: {filePath (absolute), folderName? (created if missing), addToComp? (true adds to compName or the active comp)}
 - setEffectProperty: {compName, layerIndex|layerName, effectName|effectIndex, propertyName, value}. Searches inside that effect only.
+- removeEffect: {compName?, layerIndex|layerName, effectName|effectIndex}
+- getKeyframes: {compName?, layerIndex|layerName, propertyName, effectName?}. Lists keyframes (time, value, interpolation, ease) plus any expression
+- removeKeyframes: {compName?, layerIndex|layerName, propertyName, effectName?} plus ONE of: all (true), keyIndices [..], time (seconds, must hit a keyframe)
+- getProjectStatus: {}. Project name/path, item count, active comp. Every result also carries _project; get-results adds a _warning if the project changed
+- saveProject: {path?, overwrite?}. No path saves in place; a path is Save As (refuses to replace an existing file unless overwrite is true)
+- openProject: {path, saveCurrent (required true/false)}. Closes the current project first (saveCurrent false DISCARDS unsaved changes)
+- newProject: {saveCurrent (required true/false)}. Closes the current project first
+- undo: {steps? (default 1, max 20)}. Undoes the last N bridge commands that changed the project (one undo step per command; returns their names). Does not touch manual edits, and does not cover project/render commands
+- getRenderStatus: {}. Render queue items, status and output paths
+- startRender: {}. Renders everything queued. BLOCKS After Effects until done, so a long render outlasts the server's wait; read the outcome later with getRenderStatus / get-results
 - renameEffect: {compName, layerIndex|layerName, effectName|effectIndex, newName}. Expressions referencing the old name must be updated.
 - addToRenderQueue: {compName, outputModuleTemplate?, outputPath?}. Queues only; does not start rendering.
 - setLayerExpression also accepts an optional effectName to look for the property inside that effect only.
