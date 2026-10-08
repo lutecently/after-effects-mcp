@@ -189,6 +189,24 @@ server.tool(
       "getRenderStatus",
       "exportFrame",
       "deleteProjectItems",
+      "setLayerTiming",
+      "splitLayer",
+      "setAnchorPoint",
+      "setLayerFlags",
+      "renameLayer",
+      "addMarker",
+      "getMarkers",
+      "removeMarkers",
+      "listLayerProperties",
+      "setProperty",
+      "addShapeContent",
+      "setTextDocument",
+      "getProjectTree",
+      "createFolder",
+      "moveProjectItems",
+      "setProjectItemProperties",
+      "openComp",
+      "replaceLayerSource",
       "startRender",
       "addToRenderQueue"
     ];
@@ -383,7 +401,25 @@ Layer/comp management scripts (run via run-script; comps are found by compName, 
 - openProject: {path, saveCurrent (required true/false)}. Closes the current project first (saveCurrent false DISCARDS unsaved changes)
 - newProject: {saveCurrent (required true/false)}. Closes the current project first
 - undo: {steps? (default 1, max 20)}. Undoes the last N bridge commands that changed the project (one undo step per command; returns their names). Does not touch manual edits, and does not cover project/render commands
-- deleteProjectItems: {namePrefix (min 4 chars), dryRun?}. Removes comps/footage/solids whose names start with the prefix (and every layer using them). Folders are kept. For cleaning up scratch items
+- setLayerTiming: {compName?, layerIndex|layerName, stretch? (percent, 100 = normal), startTime?, inPoint?, outPoint?, timeRemap? (bool)}
+- splitLayer: {compName?, layerIndex|layerName, time}. The original keeps the first part; a copy above it gets the rest
+- setAnchorPoint: {compName?, layerIndex|layerName, anchorPoint [x,y] | anchorPreset "center", keepPosition? (default true: the layer does not move on screen)}
+- setLayerFlags: {compName?, layerIndex|layerName, locked?, shy?, solo?, guideLayer?, motionBlur?, adjustmentLayer?, collapseTransformation?, preserveTransparency?, label? (0-16)}
+- renameLayer: {compName?, layerIndex|layerName, newName}
+- addMarker: {compName?, layerIndex|layerName? (omit for a comp marker), time, comment?, duration?, label?, chapter?, url?}
+- getMarkers: {compName?, layerIndex|layerName? (omit for comp markers)}
+- removeMarkers: {compName?, layerIndex|layerName?} plus ONE of: all (true), indices [..], time (seconds, must hit a marker)
+- listLayerProperties: {compName?, layerIndex|layerName, propertyPath? (names from the layer down)}. Lists one level of a layer's property tree (names, matchNames, values, keyframe counts, expressions) so you can find paths for setProperty and addShapeContent
+- setProperty: {compName?, layerIndex|layerName, propertyPath [..] | propertyName (+effectName?), value, time? (set a keyframe at that time)}. Sets any property: shape fills and strokes, mask values, text animators, and so on
+- addShapeContent: {compName?, layerIndex|layerName, type (group|rectangle|ellipse|star|polygon|fill|stroke|gradientFill|trimPaths|roundCorners|repeater), groupPath? (e.g. ["Contents","Group 1","Contents"]), name?, properties? ({"Color": [1,0,0]})}
+- setTextDocument: {compName?, layerIndex|layerName, text?, font? (PostScript name), fontSize?, fillColor? [r,g,b], strokeColor?, strokeWidth?, tracking?, leading?, justification? (left|center|right|justify), fauxBold?, fauxItalic?, allCaps?, smallCaps?}
+- getProjectTree: {folderName|folderId? (default: the project root), maxDepth?}. The Project panel as a tree with ids, types, labels and comp sizes
+- createFolder: {name, parentFolderName|parentFolderId?}
+- moveProjectItems: {itemIds [..] | itemNames [..] | namePrefix (min 4 chars), toFolderName|toFolderId? (default: the project root)}. Items with duplicate names must be given by id
+- setProjectItemProperties: {itemId|itemName, newName?, label? (0-16), comment?}
+- openComp: {compName}. Opens the comp in the Composition panel
+- replaceLayerSource: {compName?, layerIndex|layerName, sourceItemName|sourceItemId, fixExpressions?}
+- deleteProjectItems: {namePrefix (min 4 chars), dryRun?, includeFolders?}. Removes comps/footage/solids whose names start with the prefix (and every layer using them). Folders are kept unless includeFolders is true (then only emptied ones go). For cleaning up scratch items
 - exportFrame: {compName? (default: active comp), time? (seconds, default: comp time), outputPath? (.png; default: ~/Documents/ae-mcp-bridge/frames/), overwrite?, scale? (1 full size, 2 half, 4 quarter)}. Saves one frame as a PNG and returns its path, so you can open the image and check the result
 - getRenderStatus: {}. Render queue items, status and output paths
 - startRender: {}. Renders everything queued. BLOCKS After Effects until done, so a long render outlasts the server's wait; read the outcome later with getRenderStatus / get-results

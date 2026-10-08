@@ -252,6 +252,111 @@ async function main() {
       check("the PNG file exists", false, frame);
     }
 
+    console.log("\nLayer tools");
+    r = await run("createSolidLayer", { compName: MAIN, name: `${PREFIX}tool`, color: [0.5, 0.5, 0.5], size: [200, 100], position: [300, 300], duration: 5 });
+    check("createSolidLayer for the tool tests", isOk(r), r.message);
+    r = await run("setLayerTiming", { compName: MAIN, layerName: `${PREFIX}tool`, inPoint: 0.5 });
+    check("setLayerTiming with only inPoint trims the start and leaves the out point (AE would slide it)", isOk(r) && near(r.layer.inPoint, 0.5, 0.01) && near(r.layer.outPoint, 5, 0.01), JSON.stringify(r.layer));
+    r = await run("setLayerTiming", { compName: MAIN, layerName: `${PREFIX}tool`, outPoint: 3 });
+    check("setLayerTiming with only outPoint trims the end", isOk(r) && near(r.layer.inPoint, 0.5, 0.01) && near(r.layer.outPoint, 3, 0.01), JSON.stringify(r.layer));
+    r = await run("splitLayer", { compName: MAIN, layerName: `${PREFIX}tool`, time: 2 });
+    check("splitLayer cuts at the time", isOk(r) && near(r.first.outPoint, 2, 0.01) && near(r.second.inPoint, 2, 0.01) && near(r.first.inPoint, 0.5, 0.01) && near(r.second.outPoint, 3, 0.01), JSON.stringify(r));
+    const toolIndex = r.first.index;
+    r = await run("splitLayer", { compName: MAIN, layerIndex: toolIndex, time: 99 });
+    check("splitLayer refuses a time outside the layer", isError(r), r.message);
+
+    r = await run("setAnchorPoint", { compName: MAIN, layerIndex: toolIndex, anchorPoint: [0, 0] });
+    check("setAnchorPoint keeps the layer in place (position follows the anchor)", isOk(r) && nearVec(r.position, [200, 250]) && nearVec(r.anchorPoint, [0, 0]), JSON.stringify(r));
+    r = await run("setLayerProperties", { compName: MAIN, layerIndex: toolIndex, rotation: 90 });
+    check("rotate the tool layer", isOk(r), r.message);
+    r = await run("setAnchorPoint", { compName: MAIN, layerIndex: toolIndex, anchorPreset: "center" });
+    // center anchor is (100,50); from (0,0) that is a (100,50) shift in layer space, rotated 90 degrees clockwise = (-50,100)
+    check("setAnchorPoint accounts for rotation", isOk(r) && nearVec(r.anchorPoint, [100, 50]) && nearVec(r.position, [150, 350]), JSON.stringify(r));
+
+    r = await run("setLayerFlags", { compName: MAIN, layerIndex: toolIndex, shy: true, label: 5 });
+    check("setLayerFlags", isOk(r) && r.flags.shy === true && r.flags.label === 5, JSON.stringify(r.flags));
+    r = await run("renameLayer", { compName: MAIN, layerIndex: toolIndex, newName: `${PREFIX}tool_renamed` });
+    check("renameLayer", isOk(r) && r.layer.name === `${PREFIX}tool_renamed`, r.message);
+    info = await run("getLayerInfo", { compName: MAIN, layerName: `${PREFIX}tool_renamed` });
+    check("the rename and flags are visible in getLayerInfo", info.layers.length === 1 && info.layers[0].shy === true && info.layers[0].label === 5);
+
+    console.log("\nMarkers");
+    r = await run("addMarker", { compName: MAIN, time: 1, comment: `${PREFIX}comp marker`, duration: 0.5 });
+    check("addMarker on the comp", isOk(r), r.message);
+    r = await run("addMarker", { compName: MAIN, layerName: `${PREFIX}tool_renamed`, time: 1, comment: `${PREFIX}layer marker` });
+    check("addMarker on a layer", isOk(r), r.message);
+    r = await run("getMarkers", { compName: MAIN });
+    check("getMarkers (comp) returns the comment and duration", isOk(r) && r.owner === "comp" && r.markers.length === 1 && r.markers[0].comment === `${PREFIX}comp marker` && near(r.markers[0].duration, 0.5, 0.01), JSON.stringify(r.markers));
+    r = await run("getMarkers", { compName: MAIN, layerName: `${PREFIX}tool_renamed` });
+    check("getMarkers (layer) is separate from the comp's", isOk(r) && r.owner === "layer" && r.markers.length === 1 && r.markers[0].comment === `${PREFIX}layer marker`, JSON.stringify(r.markers));
+    r = await run("removeMarkers", { compName: MAIN, time: 2 });
+    check("removeMarkers refuses a time that is not on a marker", isError(r), r.message);
+    r = await run("removeMarkers", { compName: MAIN, all: true });
+    check("removeMarkers all", isOk(r) && r.after === 0, JSON.stringify(r));
+
+    console.log("\nShapes and the property tree");
+    r = await run("createShapeLayer", { compName: MAIN, name: `${PREFIX}shape`, shapeType: "rectangle", size: [100, 100], fillColor: [1, 0, 0], position: [800, 300] });
+    check("createShapeLayer", isOk(r), r.message);
+    r = await run("listLayerProperties", { compName: MAIN, layerName: `${PREFIX}shape`, propertyPath: ["Contents"] });
+    check("listLayerProperties shows the shape group", isOk(r) && r.properties.some((p) => p.name === "Group 1"), JSON.stringify(r.properties?.map((p) => p.name)));
+    const inner = ["Contents", "Group 1", "Contents"];
+    r = await run("listLayerProperties", { compName: MAIN, layerName: `${PREFIX}shape`, propertyPath: inner });
+    check("...and the path and fill inside it", isOk(r) && r.properties.some((p) => p.name === "Fill 1") && r.properties.some((p) => /Rectangle/.test(p.name)), JSON.stringify(r.properties?.map((p) => p.name)));
+    r = await run("addShapeContent", { compName: MAIN, layerName: `${PREFIX}shape`, type: "trimPaths", groupPath: inner, properties: { End: 50 } });
+    check("addShapeContent adds trim paths with a property set", isOk(r) && r.propertiesSet.includes("End"), r.message);
+    r = await run("listLayerProperties", { compName: MAIN, layerName: `${PREFIX}shape`, propertyPath: [...inner, r.added?.name || "Trim Paths 1"] });
+    check("the trim paths End value was applied", isOk(r) && r.properties.some((p) => p.name === "End" && near(p.value, 50, 0.01)), JSON.stringify(r.properties?.map((p) => [p.name, p.value])));
+    r = await run("addShapeContent", { compName: MAIN, layerName: `${PREFIX}shape`, type: "banana", groupPath: inner });
+    check("addShapeContent rejects an unknown type", isError(r), r.message);
+    r = await run("addShapeContent", { compName: MAIN, layerName: `${PREFIX}shape`, type: "stroke", groupPath: inner, properties: { "No Such Property": 1 } });
+    check("addShapeContent rejects an unknown property and leaves nothing behind", isError(r), r.message);
+    r = await run("listLayerProperties", { compName: MAIN, layerName: `${PREFIX}shape`, propertyPath: inner });
+    check("...no stroke was left behind", isOk(r) && !r.properties.some((p) => /Stroke/.test(p.name)), JSON.stringify(r.properties?.map((p) => p.name)));
+    r = await run("setProperty", { compName: MAIN, layerName: `${PREFIX}shape`, propertyPath: [...inner, "Fill 1", "Color"], value: [0, 1, 0] });
+    check("setProperty by path (fill colour)", isOk(r) && nearVec(r.property.newValue, [0, 1, 0], 0.01), JSON.stringify(r.property));
+    r = await run("setProperty", { compName: MAIN, layerName: `${PREFIX}shape`, propertyName: "Opacity", value: 70 });
+    check("setProperty by name", isOk(r) && near(r.property.newValue, 70, 0.01), JSON.stringify(r.property));
+    r = await run("setProperty", { compName: MAIN, layerName: `${PREFIX}shape`, propertyPath: ["Contents", "No Such Group"], value: 1 });
+    check("setProperty reports a bad path with what is available", isError(r) && /Available here/.test(r.message || ""), r.message);
+    r = await run("setProperty", { compName: MAIN, layerName: `${PREFIX}shape`, propertyPath: ["Contents"], value: 1 });
+    check("setProperty refuses a group", isError(r), r.message);
+
+    console.log("\nText");
+    r = await run("createTextLayer", { compName: MAIN, text: `${PREFIX}hello`, position: [540, 1500], fontSize: 60 });
+    check("createTextLayer", isOk(r), r.message);
+    const textIndex = r.layer.index;
+    r = await run("setTextDocument", { compName: MAIN, layerIndex: textIndex, text: `${PREFIX}changed`, fontSize: 77, tracking: 50, justification: "center", fillColor: [0, 0, 1] });
+    check("setTextDocument", isOk(r) && r.text.text === `${PREFIX}changed` && near(r.text.fontSize, 77, 0.01) && near(r.text.tracking, 50, 0.01) && nearVec(r.text.fillColor, [0, 0, 1], 0.01), JSON.stringify(r.text));
+    r = await run("setTextDocument", { compName: MAIN, layerName: `${PREFIX}shape`, text: "nope" });
+    check("setTextDocument refuses a non-text layer", isError(r), r.message);
+
+    console.log("\nProject panel");
+    const FOLDER = `${PREFIX}folder`, CHILD = `${PREFIX}child`, ALT = `${PREFIX}alt`;
+    r = await run("createFolder", { name: FOLDER });
+    check("createFolder", isOk(r) && r.folder.id > 0, r.message);
+    r = await run("createFolder", { name: CHILD, parentFolderName: FOLDER });
+    check("createFolder inside a folder", isOk(r) && r.parent.name === FOLDER, r.message);
+    r = await run("moveProjectItems", { itemNames: [PRE], toFolderName: FOLDER });
+    check("moveProjectItems", isOk(r) && r.moved.length === 1 && r.toFolder.name === FOLDER, r.message);
+    r = await run("getProjectTree", { folderName: FOLDER });
+    check("getProjectTree shows the move", isOk(r) && r.tree.children.some((c) => c.name === PRE && c.type === "composition") && r.tree.children.some((c) => c.name === CHILD && c.type === "folder"), JSON.stringify(r.tree?.children?.map((c) => c.name)));
+    check("getProjectTree gives comp sizes", r.tree.children.find((c) => c.name === PRE)?.width === 1080);
+    r = await run("moveProjectItems", { itemNames: [FOLDER], toFolderName: CHILD });
+    check("moveProjectItems refuses to put a folder inside its own subfolder", isError(r) && /subfolder/.test(r.message || ""), r.message);
+    r = await run("moveProjectItems", { itemNames: [`${PREFIX}no_such_item`], toFolderName: FOLDER });
+    check("moveProjectItems errors on an unknown item", isError(r), r.message);
+    r = await run("setProjectItemProperties", { itemName: PRE, label: 9, comment: `${PREFIX}note` });
+    check("setProjectItemProperties", isOk(r) && r.item.label === 9 && r.item.comment === `${PREFIX}note`, JSON.stringify(r.item));
+    r = await run("openComp", { compName: MAIN });
+    check("openComp", isOk(r), r.message);
+    r = await run("createComposition", { name: ALT, width: 640, height: 640, duration: 5, frameRate: 30 });
+    check("createComposition for replaceLayerSource", isOk(r), r.message);
+    info = await run("getLayerInfo", { compName: MAIN });
+    const preLayer = info.layers.find((l) => l.source && l.source.name === PRE);
+    check("MAIN has a layer using the precomp", !!preLayer);
+    r = await run("replaceLayerSource", { compName: MAIN, layerIndex: preLayer.index, sourceItemName: ALT });
+    check("replaceLayerSource", isOk(r) && r.source.name === ALT, JSON.stringify(r.source));
+
     console.log("\nQueue");
     const ids = [enqueue("getProjectStatus", {}, "clientA"), enqueue("getRenderStatus", {}, "clientB"), enqueue("listCompositions", {}, "clientA")];
     const evilId = "../evil";
@@ -274,10 +379,11 @@ async function main() {
     } else {
       console.log("\nCleanup");
       try {
-        const removed = await run("deleteProjectItems", { namePrefix: PREFIX });
-        check(`deleteProjectItems removed the test items (${(removed.items || []).length})`, isOk(removed) && removed.items.length >= 4, JSON.stringify(removed.items));
-        const left = await run("deleteProjectItems", { namePrefix: PREFIX, dryRun: true });
-        check("nothing named MCPTEST_* is left", isOk(left) && left.items.length === 0, JSON.stringify(left.items));
+        const removed = await run("deleteProjectItems", { namePrefix: PREFIX, includeFolders: true });
+        const gone = removed.items || [], goneFolders = removed.foldersRemoved || [], keptFolders = removed.foldersKept || [];
+        check(`deleteProjectItems removed the test items (${gone.length}) and folders (${goneFolders.length})`, isOk(removed) && gone.length >= 4 && Array.isArray(removed.foldersKept) && keptFolders.length === 0, JSON.stringify(removed));
+        const left = await run("deleteProjectItems", { namePrefix: PREFIX, dryRun: true, includeFolders: true });
+        check("nothing named MCPTEST_* is left", isOk(left) && (left.items || []).length === 0 && (left.foldersRemoved || []).length === 0, JSON.stringify(left));
         const end = await run("getProjectStatus");
         console.log(`  note ${startItems} items before, ${end.numItems} after (a Solids folder may have been created and is left in place)`);
       } catch (cleanupError) {
