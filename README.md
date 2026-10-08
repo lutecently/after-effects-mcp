@@ -224,6 +224,21 @@ You can animate layers with:
 | `saveProject`               | Save, or Save As a path (won't overwrite without `overwrite`) |
 | `openProject` / `newProject`| Replace the open project (`saveCurrent` must be stated) |
 | `undo`                      | Undo the last N bridge commands       |
+| `setLayerTiming`            | Trim, start time, stretch, time remap |
+| `splitLayer`                | Cut a layer in two at a time          |
+| `setAnchorPoint`            | Set the anchor point (optionally without moving the layer) |
+| `setLayerFlags`             | Lock, shy, solo, guide, motion blur, label |
+| `renameLayer`               | Rename a layer                        |
+| `addMarker` / `getMarkers` / `removeMarkers` | Layer and comp markers |
+| `listLayerProperties`       | Browse a layer's property tree        |
+| `setProperty`               | Set any property by path (shapes, masks, text animators) |
+| `addShapeContent`           | Add fills, strokes, trim paths, repeaters and shapes to a shape layer |
+| `setTextDocument`           | Edit text, font, size, colour, tracking, leading |
+| `getProjectTree`            | The Project panel as a tree           |
+| `createFolder` / `moveProjectItems` | Organise the Project panel     |
+| `setProjectItemProperties`  | Rename, label or comment a project item |
+| `openComp`                  | Open a comp in the Composition panel  |
+| `replaceLayerSource`        | Swap a layer's source item            |
 | `exportFrame`               | Save one frame of a comp as a PNG (optional time and scale), so the result can be looked at |
 | `getRenderStatus`           | Render queue status and output paths  |
 | `startRender`               | Render the queue (blocks After Effects until done) |

@@ -2274,7 +2274,7 @@ function newProject(args) {
 var undoStack = [];
 var readOnlyCommands = {
     getProjectInfo: 1, listCompositions: 1, getLayerInfo: 1, getKeyframes: 1, getProjectStatus: 1,
-    getRenderStatus: 1, exportFrame: 1, "test-animation": 1, bridgeTestEffects: 1
+    getRenderStatus: 1, exportFrame: 1, getMarkers: 1, listLayerProperties: 1, getProjectTree: 1, openComp: 1, "test-animation": 1, bridgeTestEffects: 1
 };
 
 function resultIsError(resultString) {
@@ -2366,28 +2366,604 @@ function exportFrame(args) {
     }
 }
 
+// ===== Layer, marker, property and project-panel tools =====
+
+function isSet(v) { return v !== undefined && v !== null; }
+function hasLayerRef(args) { return isSet(args.layerIndex) || !!args.layerName; }
+function fail(error) { return JSON.stringify({ status: "error", message: error.toString() }, null, 2); }
+
+// --- setLayerTiming ---
+// {compName?, layerIndex|layerName, stretch? (percent, 100 = normal), startTime?, inPoint?, outPoint?, timeRemap? (bool)}
+function setLayerTiming(args) {
+    try {
+        var layer = resolveTarget(args).layer;
+        var changed = [];
+        // Stretch first (it moves the in/out points), then start, then the trim points
+        if (isSet(args.stretch)) { layer.stretch = Number(args.stretch); changed.push("stretch"); }
+        if (isSet(args.startTime)) { layer.startTime = Number(args.startTime); changed.push("startTime"); }
+        // Setting inPoint also slides outPoint along with it, so keep the out point where it was (or where it was asked to be)
+        var wantedOut = isSet(args.outPoint) ? Number(args.outPoint) : layer.outPoint;
+        if (isSet(args.inPoint)) { layer.inPoint = Number(args.inPoint); changed.push("inPoint"); }
+        if (isSet(args.outPoint) || isSet(args.inPoint)) {
+            layer.outPoint = wantedOut;
+            if (isSet(args.outPoint)) { changed.push("outPoint"); }
+        }
+        if (isSet(args.timeRemap)) { layer.timeRemapEnabled = !!args.timeRemap; changed.push("timeRemap"); }
+        if (changed.length === 0) { throw new Error("Nothing to change: give stretch, startTime, inPoint, outPoint or timeRemap"); }
+        return JSON.stringify({
+            status: "success", message: "Layer timing updated",
+            layer: { name: layer.name, index: layer.index, startTime: layer.startTime, inPoint: layer.inPoint, outPoint: layer.outPoint, stretch: layer.stretch, timeRemapEnabled: !!layer.timeRemapEnabled },
+            changed: changed
+        }, null, 2);
+    } catch (error) { return fail(error); }
+}
+
+// --- splitLayer: cut a layer in two at a time ---
+// {compName?, layerIndex|layerName, time}. The original keeps the first part; the new copy (above it) gets the rest.
+function splitLayer(args) {
+    try {
+        var layer = resolveTarget(args).layer;
+        var time = Number(args.time);
+        if (!(time > layer.inPoint && time < layer.outPoint)) {
+            throw new Error("time " + args.time + " must be inside the layer (between " + layer.inPoint + " and " + layer.outPoint + ")");
+        }
+        var originalOut = layer.outPoint;
+        var copy = layer.duplicate();
+        layer.outPoint = time;
+        copy.inPoint = time;
+        copy.outPoint = originalOut; // setting inPoint slides outPoint too, so put it back
+        return JSON.stringify({
+            status: "success", message: "Layer split at " + time + "s",
+            first: { name: layer.name, index: layer.index, inPoint: layer.inPoint, outPoint: layer.outPoint },
+            second: { name: copy.name, index: copy.index, inPoint: copy.inPoint, outPoint: copy.outPoint }
+        }, null, 2);
+    } catch (error) { return fail(error); }
+}
+
+// --- setAnchorPoint ---
+// {compName?, layerIndex|layerName, anchorPoint [x,y(,z)] | anchorPreset "center", keepPosition? (default true)}
+// keepPosition moves Position so the layer does not shift on screen (accounts for scale and rotation).
+function setAnchorPoint(args) {
+    try {
+        var target = resolveTarget(args);
+        var layer = target.layer, comp = target.comp;
+        var transform = layer.property("Transform");
+        var anchorProp = transform.property("Anchor Point");
+        var posProp = transform.property("Position");
+        var oldA = anchorProp.value;
+        var newA;
+        if (args.anchorPreset) {
+            if (args.anchorPreset !== "center") { throw new Error("anchorPreset must be \"center\""); }
+            var rect = layer.sourceRectAtTime(comp.time, false);
+            newA = [rect.left + rect.width / 2, rect.top + rect.height / 2];
+        } else if (args.anchorPoint && args.anchorPoint.length >= 2) {
+            newA = [Number(args.anchorPoint[0]), Number(args.anchorPoint[1])];
+            if (args.anchorPoint.length > 2) { newA.push(Number(args.anchorPoint[2])); }
+        } else {
+            throw new Error("Give anchorPoint [x, y] or anchorPreset \"center\"");
+        }
+        if (oldA.length > 2 && newA.length === 2) { newA.push(oldA[2]); }
+
+        if (args.keepPosition !== false) {
+            if (layer.threeDLayer) { throw new Error("keepPosition is not supported for 3D layers; pass keepPosition: false"); }
+            if (anchorProp.numKeys > 0 || anchorProp.expressionEnabled || posProp.numKeys > 0 || posProp.expressionEnabled) {
+                throw new Error("Anchor Point or Position is animated; pass keepPosition: false to set the anchor only");
+            }
+            var scale = transform.property("Scale").value;
+            var rot = transform.property("Rotation").value * Math.PI / 180;
+            var dx = (newA[0] - oldA[0]) * scale[0] / 100;
+            var dy = (newA[1] - oldA[1]) * scale[1] / 100;
+            var pos = posProp.value;
+            var moved = [pos[0] + dx * Math.cos(rot) - dy * Math.sin(rot), pos[1] + dx * Math.sin(rot) + dy * Math.cos(rot)];
+            if (pos.length > 2) { moved.push(pos[2]); }
+            posProp.setValue(moved);
+        }
+        anchorProp.setValue(newA);
+        return JSON.stringify({
+            status: "success", message: "Anchor point set",
+            layer: { name: layer.name, index: layer.index },
+            anchorPoint: anchorProp.value, position: posProp.value
+        }, null, 2);
+    } catch (error) { return fail(error); }
+}
+
+// --- setLayerFlags ---
+// {compName?, layerIndex|layerName, locked?, shy?, solo?, guideLayer?, motionBlur?, adjustmentLayer?,
+//  collapseTransformation?, preserveTransparency?, label? (0-16)}
+function setLayerFlags(args) {
+    try {
+        var layer = resolveTarget(args).layer;
+        var names = ["locked", "shy", "solo", "guideLayer", "motionBlur", "adjustmentLayer", "collapseTransformation", "preserveTransparency", "label"];
+        var applied = [], unsupported = [];
+        for (var i = 0; i < names.length; i++) {
+            var name = names[i];
+            if (!isSet(args[name])) { continue; }
+            try {
+                if (name === "label") {
+                    var label = parseInt(args.label, 10);
+                    if (!(label >= 0 && label <= 16)) { throw new Error("label must be 0-16"); }
+                    layer.label = label;
+                } else {
+                    layer[name] = !!args[name];
+                }
+                applied.push(name);
+            } catch (e) { unsupported.push(name + ": " + e.toString()); }
+        }
+        if (applied.length === 0 && unsupported.length === 0) { throw new Error("Nothing to change: give one of " + names.join(", ")); }
+        var flags = {};
+        for (var j = 0; j < names.length; j++) { try { flags[names[j]] = layer[names[j]]; } catch (e2) {} }
+        return JSON.stringify({ status: unsupported.length > 0 && applied.length === 0 ? "error" : "success", message: "Layer flags updated", layer: { name: layer.name, index: layer.index }, applied: applied, unsupported: unsupported, flags: flags }, null, 2);
+    } catch (error) { return fail(error); }
+}
+
+// --- renameLayer ---
+function renameLayer(args) {
+    try {
+        var layer = resolveTarget(args).layer;
+        if (!args.newName) { throw new Error("newName is required"); }
+        var oldName = layer.name;
+        layer.name = String(args.newName);
+        return JSON.stringify({ status: "success", message: "Layer renamed", layer: { oldName: oldName, name: layer.name, index: layer.index } }, null, 2);
+    } catch (error) { return fail(error); }
+}
+
+// --- Markers ---
+// A layer marker if layerIndex/layerName is given, otherwise a marker on the comp itself.
+function resolveMarkerTarget(args) {
+    var t = resolveTarget(args, false);
+    var prop = hasLayerRef(args) ? resolveLayer(t.comp, args.layerIndex, args.layerName || "").marker : t.comp.markerProperty;
+    return { comp: t.comp, prop: prop, owner: hasLayerRef(args) ? "layer" : "comp" };
+}
+
+function markerInfo(prop, k) {
+    var mv = prop.keyValue(k);
+    var info = { index: k, time: prop.keyTime(k), comment: mv.comment, duration: mv.duration };
+    try { info.chapter = mv.chapter; info.url = mv.url; info.label = mv.label; } catch (e) {}
+    return info;
+}
+
+// {compName?, layerIndex|layerName? (omit for a comp marker), time, comment?, duration?, label? (0-16), chapter?, url?}
+function addMarker(args) {
+    try {
+        var target = resolveMarkerTarget(args);
+        if (!isSet(args.time) || !(Number(args.time) >= 0)) { throw new Error("time (seconds, 0 or more) is required"); }
+        var mv = new MarkerValue(args.comment ? String(args.comment) : "");
+        if (isSet(args.duration)) { mv.duration = Number(args.duration); }
+        if (isSet(args.label)) { try { mv.label = parseInt(args.label, 10); } catch (e1) {} }
+        if (args.chapter) { mv.chapter = String(args.chapter); }
+        if (args.url) { mv.url = String(args.url); }
+        target.prop.setValueAtTime(Number(args.time), mv);
+        return JSON.stringify({ status: "success", message: "Marker added to the " + target.owner, markers: target.prop.numKeys }, null, 2);
+    } catch (error) { return fail(error); }
+}
+
+function getMarkers(args) {
+    try {
+        var target = resolveMarkerTarget(args);
+        var markers = [];
+        for (var k = 1; k <= target.prop.numKeys; k++) { markers.push(markerInfo(target.prop, k)); }
+        return JSON.stringify({ status: "success", owner: target.owner, markers: markers }, null, 2);
+    } catch (error) { return fail(error); }
+}
+
+// plus ONE of: all (true), indices [..], time (seconds, must hit a marker)
+function removeMarkers(args) {
+    try {
+        var target = resolveMarkerTarget(args);
+        var prop = target.prop;
+        var before = prop.numKeys;
+        var hasIndices = args.indices && args.indices.length > 0;
+        if (!args.all && !isSet(args.time) && !hasIndices) { throw new Error("Specify one of: all (true), indices, or time"); }
+        var which = [];
+        if (args.all) { for (var a = 1; a <= before; a++) { which.push(a); } }
+        else if (isSet(args.time)) {
+            if (before === 0) { throw new Error("There are no markers"); }
+            var nearest = prop.nearestKeyIndex(Number(args.time));
+            if (Math.abs(prop.keyTime(nearest) - Number(args.time)) > target.comp.frameDuration / 2) {
+                throw new Error("No marker at " + args.time + "s (nearest is #" + nearest + " at " + prop.keyTime(nearest) + "s)");
+            }
+            which.push(nearest);
+        } else { which = args.indices.slice(0); }
+        for (var c = 0; c < which.length; c++) { if (which[c] < 1 || which[c] > before) { throw new Error("Marker index out of range: " + which[c] + " (there are " + before + ")"); } }
+        which.sort(function (x, y) { return y - x; });
+        for (var d = 0; d < which.length; d++) { if (d > 0 && which[d] === which[d - 1]) { continue; } prop.removeKey(which[d]); }
+        return JSON.stringify({ status: "success", message: "Markers removed", before: before, after: prop.numKeys }, null, 2);
+    } catch (error) { return fail(error); }
+}
+
+// --- Generic property access (shapes, text, masks, anything) ---
+function propertyKind(p) {
+    if (p.propertyType === PropertyType.PROPERTY) { return "property"; }
+    if (p.propertyType === PropertyType.INDEXED_GROUP) { return "indexed-group"; }
+    return "group";
+}
+
+function valueTypeName(p) {
+    var t = p.propertyValueType;
+    if (t === PropertyValueType.NO_VALUE) { return "none"; }
+    if (t === PropertyValueType.ThreeD_SPATIAL) { return "3d-spatial"; }
+    if (t === PropertyValueType.ThreeD) { return "3d"; }
+    if (t === PropertyValueType.TwoD_SPATIAL) { return "2d-spatial"; }
+    if (t === PropertyValueType.TwoD) { return "2d"; }
+    if (t === PropertyValueType.OneD) { return "1d"; }
+    if (t === PropertyValueType.COLOR) { return "color"; }
+    if (t === PropertyValueType.CUSTOM_VALUE) { return "custom"; }
+    if (t === PropertyValueType.MARKER) { return "marker"; }
+    if (t === PropertyValueType.LAYER_INDEX) { return "layer-index"; }
+    if (t === PropertyValueType.MASK_INDEX) { return "mask-index"; }
+    if (t === PropertyValueType.SHAPE) { return "shape"; }
+    if (t === PropertyValueType.TEXT_DOCUMENT) { return "text-document"; }
+    return "unknown";
+}
+
+function childNames(node) {
+    var names = [];
+    try { for (var i = 1; i <= node.numProperties; i++) { names.push(node.property(i).name); } } catch (e) {}
+    return names;
+}
+
+// Follow a path of property names/matchNames from the layer down, e.g. ["Contents","Group 1","Contents","Fill 1","Color"]
+function walkPropertyPath(layer, path) {
+    var node = layer;
+    for (var i = 0; i < path.length; i++) {
+        var next = node.property(path[i]);
+        if (!next) {
+            throw new Error("Property path step " + (i + 1) + " '" + path[i] + "' not found. Available here: " + childNames(node).join(", "));
+        }
+        node = next;
+    }
+    return node;
+}
+
+function describeNode(p, index) {
+    var info = { index: index, name: p.name, matchName: p.matchName, kind: propertyKind(p) };
+    if (info.kind === "property") {
+        info.valueType = valueTypeName(p);
+        var vt = info.valueType;
+        if (vt !== "none" && vt !== "custom" && vt !== "shape" && vt !== "text-document" && vt !== "marker") { info.value = safePropertyValue(p); }
+        info.numKeyframes = p.numKeys;
+        if (p.expressionEnabled) { info.expression = p.expression; }
+    } else {
+        info.numChildren = p.numProperties;
+    }
+    return info;
+}
+
+// {compName?, layerIndex|layerName, propertyPath? (names/matchNames from the layer; default: the layer's top level)}
+// Lists one level of the property tree so paths for setProperty / addShapeContent can be discovered.
+function listLayerProperties(args) {
+    try {
+        var layer = resolveTarget(args).layer;
+        var path = args.propertyPath && args.propertyPath.length ? args.propertyPath : [];
+        var node = path.length ? walkPropertyPath(layer, path) : layer;
+        var entries = [];
+        if (path.length && node.propertyType === PropertyType.PROPERTY) {
+            entries.push(describeNode(node, node.propertyIndex));
+        } else {
+            for (var i = 1; i <= node.numProperties; i++) { try { entries.push(describeNode(node.property(i), i)); } catch (e) {} }
+        }
+        return JSON.stringify({ status: "success", layer: { name: layer.name, index: layer.index }, path: path, properties: entries }, null, 2);
+    } catch (error) { return fail(error); }
+}
+
+function normalizeValue(prop, value) {
+    if (typeof value === "boolean") { return value ? 1 : 0; }
+    if (prop.propertyValueType === PropertyValueType.COLOR && value instanceof Array && value.length === 3) { return [value[0], value[1], value[2], 1]; }
+    return value;
+}
+
+// {compName?, layerIndex|layerName, propertyPath? | propertyName (+ effectName?), value, time? (set a keyframe at this time)}
+function setProperty(args) {
+    try {
+        var layer = resolveTarget(args).layer;
+        var prop;
+        if (args.propertyPath && args.propertyPath.length) { prop = walkPropertyPath(layer, args.propertyPath); }
+        else if (args.propertyName) {
+            prop = findLayerProperty(layer, args.propertyName, args.effectName);
+            if (!prop) { throw new Error("Property '" + args.propertyName + "' not found on layer '" + layer.name + "' (use listLayerProperties to find its path)"); }
+        } else { throw new Error("Give propertyPath or propertyName"); }
+        if (prop.propertyType !== PropertyType.PROPERTY) { throw new Error("'" + prop.name + "' is a group, not a value. Go one level deeper (see listLayerProperties)"); }
+        if (args.value === undefined) { throw new Error("value is required"); }
+        if (prop.matchName === "ADBE Text Document") { throw new Error("Use setTextDocument for the text itself"); }
+        var oldValue = safePropertyValue(prop);
+        var value = normalizeValue(prop, args.value);
+        if (isSet(args.time)) { prop.setValueAtTime(Number(args.time), value); }
+        else {
+            if (prop.numKeys > 0) { throw new Error("'" + prop.name + "' has " + prop.numKeys + " keyframes: pass time to add one, or remove them first"); }
+            prop.setValue(value);
+        }
+        return JSON.stringify({
+            status: "success", message: "Property set",
+            property: { name: prop.name, matchName: prop.matchName, oldValue: oldValue, newValue: safePropertyValue(prop), keyframes: prop.numKeys, expressionEnabled: prop.expressionEnabled }
+        }, null, 2);
+    } catch (error) { return fail(error); }
+}
+
+// --- addShapeContent: add a path, fill, stroke or modifier to a shape layer ---
+// {compName?, layerIndex|layerName, type, groupPath? (path to the Contents to add into; default: the layer's Contents),
+//  name?, properties? ({"Color": [1,0,0], ...})}
+var shapeContentTypes = {
+    group: "ADBE Vector Group",
+    rectangle: "ADBE Vector Shape - Rect",
+    ellipse: "ADBE Vector Shape - Ellipse",
+    star: "ADBE Vector Shape - Star",
+    polygon: "ADBE Vector Shape - Star",
+    fill: "ADBE Vector Graphic - Fill",
+    stroke: "ADBE Vector Graphic - Stroke",
+    gradientFill: "ADBE Vector Graphic - G-Fill",
+    trimPaths: "ADBE Vector Filter - Trim",
+    roundCorners: "ADBE Vector Filter - RC",
+    repeater: "ADBE Vector Filter - Repeater"
+};
+
+function addShapeContent(args) {
+    var added = null;
+    try {
+        var layer = resolveTarget(args).layer;
+        var matchName = shapeContentTypes[args.type];
+        if (!matchName) {
+            var known = [];
+            for (var k in shapeContentTypes) { if (shapeContentTypes.hasOwnProperty(k)) { known.push(k); } }
+            throw new Error("type must be one of: " + known.join(", "));
+        }
+        var container = (args.groupPath && args.groupPath.length) ? walkPropertyPath(layer, args.groupPath) : layer.property("Contents");
+        if (!container) { throw new Error("Layer '" + layer.name + "' has no Contents: it is not a shape layer"); }
+        if (!container.canAddProperty(matchName)) {
+            throw new Error("Cannot add a " + args.type + " there. Point groupPath at a group's Contents, e.g. [\"Contents\",\"Group 1\",\"Contents\"] (see listLayerProperties)");
+        }
+        added = container.addProperty(matchName);
+        if (args.type === "polygon") { added.property("Type").setValue(1); }
+        else if (args.type === "star") { added.property("Type").setValue(2); }
+        if (args.name) { added.name = String(args.name); }
+        var set = [];
+        if (args.properties) {
+            for (var pname in args.properties) {
+                if (!args.properties.hasOwnProperty(pname)) { continue; }
+                var p = findPropertyInsideGroup(added, pname);
+                if (!p) { throw new Error("The new " + args.type + " has no property '" + pname + "'. It has: " + childNames(added).join(", ")); }
+                p.setValue(normalizeValue(p, args.properties[pname]));
+                set.push(pname);
+            }
+        }
+        return JSON.stringify({
+            status: "success", message: "Added " + args.type,
+            added: { name: added.name, matchName: added.matchName, index: added.propertyIndex },
+            propertiesSet: set
+        }, null, 2);
+    } catch (error) {
+        // Do not leave half-configured content behind
+        if (added) { try { added.remove(); } catch (removeError) {} }
+        return fail(error);
+    }
+}
+
+// --- setTextDocument: edit the text, font and paragraph of a text layer ---
+// {compName?, layerIndex|layerName, text?, font? (PostScript name), fontSize?, fillColor? [r,g,b], strokeColor?, strokeWidth?,
+//  tracking?, leading?, justification? ("left"|"center"|"right"|"justify"), fauxBold?, fauxItalic?, allCaps?, smallCaps?}
+function setTextDocument(args) {
+    try {
+        var layer = resolveTarget(args).layer;
+        var textGroup = layer.property("ADBE Text Properties");
+        var textProp = textGroup ? textGroup.property("ADBE Text Document") : null;
+        if (!textProp) { throw new Error("Layer '" + layer.name + "' is not a text layer"); }
+        if (textProp.numKeys > 0) { throw new Error("The text has keyframes; remove them before editing it"); }
+        var doc = textProp.value;
+        var changed = [];
+        if (isSet(args.text)) { doc.text = String(args.text); changed.push("text"); }
+        if (args.font) { doc.font = String(args.font); changed.push("font"); }
+        if (isSet(args.fontSize)) { doc.fontSize = Number(args.fontSize); changed.push("fontSize"); }
+        if (args.fillColor) { doc.fillColor = [Number(args.fillColor[0]), Number(args.fillColor[1]), Number(args.fillColor[2])]; doc.applyFill = true; changed.push("fillColor"); }
+        if (args.strokeColor) { doc.strokeColor = [Number(args.strokeColor[0]), Number(args.strokeColor[1]), Number(args.strokeColor[2])]; doc.applyStroke = true; changed.push("strokeColor"); }
+        if (isSet(args.strokeWidth)) { doc.strokeWidth = Number(args.strokeWidth); doc.applyStroke = Number(args.strokeWidth) > 0; changed.push("strokeWidth"); }
+        if (isSet(args.tracking)) { doc.tracking = Number(args.tracking); changed.push("tracking"); }
+        if (isSet(args.leading)) { doc.autoLeading = false; doc.leading = Number(args.leading); changed.push("leading"); }
+        if (args.justification) {
+            var j = { left: ParagraphJustification.LEFT_JUSTIFY, center: ParagraphJustification.CENTER_JUSTIFY, right: ParagraphJustification.RIGHT_JUSTIFY, justify: ParagraphJustification.FULL_JUSTIFY_LASTLINE_LEFT }[args.justification];
+            if (j === undefined) { throw new Error("justification must be left, center, right or justify"); }
+            doc.justification = j;
+            changed.push("justification");
+        }
+        var bools = ["fauxBold", "fauxItalic", "allCaps", "smallCaps"];
+        for (var b = 0; b < bools.length; b++) { if (isSet(args[bools[b]])) { doc[bools[b]] = !!args[bools[b]]; changed.push(bools[b]); } }
+        if (changed.length === 0) { throw new Error("Nothing to change: give text, font, fontSize, fillColor, strokeColor, strokeWidth, tracking, leading, justification, fauxBold, fauxItalic, allCaps or smallCaps"); }
+        textProp.setValue(doc);
+        var now = textProp.value;
+        return JSON.stringify({
+            status: "success", message: "Text updated",
+            layer: { name: layer.name, index: layer.index },
+            changed: changed,
+            text: { text: now.text, font: now.font, fontSize: now.fontSize, fillColor: now.fillColor, tracking: now.tracking }
+        }, null, 2);
+    } catch (error) { return fail(error); }
+}
+
+// --- Project panel ---
+function projectItemType(item) {
+    if (item instanceof CompItem) { return "composition"; }
+    if (item instanceof FolderItem) { return "folder"; }
+    if (item instanceof FootageItem && item.mainSource instanceof SolidSource) { return "solid"; }
+    return "footage";
+}
+
+// Find a project item by id, or by exact name (an error if the name is ambiguous, listing the ids)
+function resolveProjectItemRef(id, name, what) {
+    var i;
+    if (isSet(id)) {
+        for (i = 1; i <= app.project.numItems; i++) { if (app.project.item(i).id === Number(id)) { return app.project.item(i); } }
+        throw new Error(what + " with id " + id + " not found");
+    }
+    if (name) {
+        var matches = [];
+        for (i = 1; i <= app.project.numItems; i++) { if (app.project.item(i).name === name) { matches.push(app.project.item(i)); } }
+        if (matches.length === 0) { throw new Error(what + " not found: '" + name + "'"); }
+        if (matches.length > 1) {
+            var ids = [];
+            for (var m = 0; m < matches.length; m++) { ids.push(matches[m].id + " (" + projectItemType(matches[m]) + ")"); }
+            throw new Error("More than one item is named '" + name + "': ids " + ids.join(", ") + ". Pass an id (see getProjectTree)");
+        }
+        return matches[0];
+    }
+    throw new Error("Provide the " + what + "'s id or name");
+}
+
+function resolveFolderOrRoot(id, name) {
+    if (!isSet(id) && !name) { return app.project.rootFolder; }
+    var folder = resolveProjectItemRef(id, name, "Folder");
+    if (!(folder instanceof FolderItem)) { throw new Error("'" + folder.name + "' is not a folder"); }
+    return folder;
+}
+
+function treeNode(item, depth, maxDepth) {
+    var node = { id: item.id, name: item.name, type: projectItemType(item), label: item.label };
+    if (item.comment) { node.comment = item.comment; }
+    if (item instanceof CompItem) {
+        node.width = item.width; node.height = item.height; node.duration = item.duration; node.frameRate = item.frameRate; node.numLayers = item.numLayers;
+    } else if (item instanceof FootageItem && !(item.mainSource instanceof SolidSource)) {
+        try { if (item.file) { node.path = item.file.fsName; } } catch (e) {}
+    }
+    if (item instanceof FolderItem) {
+        node.numItems = item.numItems;
+        if (depth < maxDepth) {
+            node.children = [];
+            for (var i = 1; i <= item.numItems; i++) { node.children.push(treeNode(item.item(i), depth + 1, maxDepth)); }
+        }
+    }
+    return node;
+}
+
+// {folderName|folderId? (default: the project root), maxDepth? (default 20)}
+function getProjectTree(args) {
+    try {
+        args = args || {};
+        var folder = resolveFolderOrRoot(args.folderId, args.folderName);
+        var tree = treeNode(folder, 0, isSet(args.maxDepth) ? Number(args.maxDepth) : 20);
+        if (folder === app.project.rootFolder) { tree.name = "(project root)"; }
+        return JSON.stringify({ status: "success", tree: tree }, null, 2);
+    } catch (error) { return fail(error); }
+}
+
+// {name, parentFolderName|parentFolderId? (default: the project root)}
+function createFolder(args) {
+    try {
+        if (!args.name) { throw new Error("name is required"); }
+        var parent = resolveFolderOrRoot(args.parentFolderId, args.parentFolderName);
+        var folder = app.project.items.addFolder(String(args.name));
+        if (parent !== app.project.rootFolder) { folder.parentFolder = parent; }
+        return JSON.stringify({ status: "success", message: "Folder created", folder: { id: folder.id, name: folder.name }, parent: { id: parent.id, name: parent === app.project.rootFolder ? "(project root)" : parent.name } }, null, 2);
+    } catch (error) { return fail(error); }
+}
+
+// {itemIds? [..] | itemNames? [..] | namePrefix? (min 4 chars), toFolderName|toFolderId? (default: the project root)}
+function moveProjectItems(args) {
+    try {
+        var dest = resolveFolderOrRoot(args.toFolderId, args.toFolderName);
+        var items = [], i;
+        if (args.itemIds && args.itemIds.length) { for (i = 0; i < args.itemIds.length; i++) { items.push(resolveProjectItemRef(args.itemIds[i], null, "Item")); } }
+        else if (args.itemNames && args.itemNames.length) { for (i = 0; i < args.itemNames.length; i++) { items.push(resolveProjectItemRef(null, args.itemNames[i], "Item")); } }
+        else if (args.namePrefix) {
+            if (String(args.namePrefix).length < 4) { throw new Error("namePrefix must be at least 4 characters"); }
+            for (i = 1; i <= app.project.numItems; i++) { if (app.project.item(i).name.indexOf(args.namePrefix) === 0 && app.project.item(i) !== dest) { items.push(app.project.item(i)); } }
+            if (items.length === 0) { throw new Error("No items start with '" + args.namePrefix + "'"); }
+        } else { throw new Error("Give itemIds, itemNames or namePrefix"); }
+
+        // Check everything before moving anything: a folder cannot go inside itself or one of its own subfolders
+        for (i = 0; i < items.length; i++) {
+            if (items[i] === dest) { throw new Error("Cannot move folder '" + dest.name + "' into itself"); }
+            if (items[i] instanceof FolderItem) {
+                var up = dest;
+                while (up && up !== app.project.rootFolder) {
+                    if (up === items[i]) { throw new Error("Cannot move folder '" + items[i].name + "' into its own subfolder '" + dest.name + "'"); }
+                    up = up.parentFolder;
+                }
+            }
+        }
+        var moved = [];
+        for (i = 0; i < items.length; i++) { items[i].parentFolder = dest; moved.push({ id: items[i].id, name: items[i].name }); }
+        return JSON.stringify({ status: "success", message: "Moved " + moved.length + " item(s)", moved: moved, toFolder: { id: dest.id, name: dest === app.project.rootFolder ? "(project root)" : dest.name } }, null, 2);
+    } catch (error) { return fail(error); }
+}
+
+// {itemId|itemName, newName?, label? (0-16), comment?}
+function setProjectItemProperties(args) {
+    try {
+        var item = resolveProjectItemRef(args.itemId, args.itemName, "Item");
+        var changed = [];
+        if (isSet(args.newName)) { if (!args.newName) { throw new Error("newName cannot be empty"); } item.name = String(args.newName); changed.push("name"); }
+        if (isSet(args.label)) {
+            var label = parseInt(args.label, 10);
+            if (!(label >= 0 && label <= 16)) { throw new Error("label must be 0-16"); }
+            item.label = label; changed.push("label");
+        }
+        if (isSet(args.comment)) { item.comment = String(args.comment); changed.push("comment"); }
+        if (changed.length === 0) { throw new Error("Nothing to change: give newName, label or comment"); }
+        return JSON.stringify({ status: "success", message: "Item updated", item: { id: item.id, name: item.name, type: projectItemType(item), label: item.label, comment: item.comment }, changed: changed }, null, 2);
+    } catch (error) { return fail(error); }
+}
+
+// {compName}. Opens the comp in the Composition panel.
+function openComp(args) {
+    try {
+        var comp = findCompByNameStrict(args.compName || "");
+        comp.openInViewer();
+        return JSON.stringify({ status: "success", message: "Opened in the Composition panel", composition: { id: comp.id, name: comp.name } }, null, 2);
+    } catch (error) { return fail(error); }
+}
+
+// {compName?, layerIndex|layerName, sourceItemName|sourceItemId, fixExpressions? (default false)}
+function replaceLayerSource(args) {
+    try {
+        var layer = resolveTarget(args).layer;
+        var item = resolveProjectItemRef(args.sourceItemId, args.sourceItemName, "Source item");
+        if (!(item instanceof CompItem) && !(item instanceof FootageItem)) { throw new Error("'" + item.name + "' cannot be used as a layer source"); }
+        var oldName = layer.source ? layer.source.name : null;
+        layer.replaceSource(item, !!args.fixExpressions);
+        return JSON.stringify({ status: "success", message: "Layer source replaced", layer: { name: layer.name, index: layer.index }, source: { oldName: oldName, name: layer.source ? layer.source.name : null } }, null, 2);
+    } catch (error) { return fail(error); }
+}
+
 // --- deleteProjectItems: remove comps and footage/solids whose names start with a prefix ---
-// {namePrefix (at least 4 characters), dryRun?}. Removing an item also removes every layer that uses it.
-// Folders are never removed. Meant for cleaning up scratch items (e.g. the test harness's "MCPTEST_" items).
+// {namePrefix (at least 4 characters), dryRun?, includeFolders?}. Removing an item also removes every layer that uses it.
+// Folders are kept unless includeFolders is true, and then only those that are empty once the items are gone.
+// Meant for cleaning up scratch items (e.g. the test harness's "MCPTEST_" items).
 function deleteProjectItems(args) {
     try {
         var prefix = args.namePrefix ? String(args.namePrefix) : "";
         if (prefix.length < 4) { throw new Error("namePrefix is required and must be at least 4 characters, so this cannot match everything"); }
         var matches = [];
+        var folders = [];
         for (var i = 1; i <= app.project.numItems; i++) {
             var item = app.project.item(i);
-            if (item instanceof FolderItem) { continue; }
-            if (item.name.indexOf(prefix) === 0) { matches.push(item); }
+            if (item.name.indexOf(prefix) !== 0) { continue; }
+            if (item instanceof FolderItem) { folders.push(item); } else { matches.push(item); }
         }
         var names = [];
         for (var j = 0; j < matches.length; j++) { names.push(matches[j].name); }
+        var foldersRemoved = [], foldersKept = [];
         if (!args.dryRun) {
             for (var k = 0; k < matches.length; k++) { try { matches[k].remove(); } catch (removeError) {} }
+            if (args.includeFolders) {
+                // Repeat so a prefixed folder inside another prefixed folder goes first
+                for (var pass = 0; pass < 5 && folders.length > 0; pass++) {
+                    var remaining = [];
+                    for (var f = 0; f < folders.length; f++) {
+                        try {
+                            if (folders[f].numItems === 0) { foldersRemoved.push(folders[f].name); folders[f].remove(); }
+                            else { remaining.push(folders[f]); }
+                        } catch (folderError) { remaining.push(folders[f]); }
+                    }
+                    folders = remaining;
+                }
+                for (var r = 0; r < folders.length; r++) { try { foldersKept.push(folders[r].name); } catch (e2) {} }
+            }
+        } else if (args.includeFolders) {
+            for (var d = 0; d < folders.length; d++) { foldersRemoved.push(folders[d].name); }
         }
         return JSON.stringify({
             status: "success",
             message: args.dryRun ? "Dry run: nothing removed" : "Removed " + matches.length + " item(s)",
             items: names,
+            foldersRemoved: foldersRemoved,
+            foldersKept: foldersKept,
             numItems: app.project.numItems
         }, null, 2);
     } catch (error) {
@@ -2637,6 +3213,60 @@ function executeCommand(command, args, id) {
                 break;
             case "undo":
                 result = undoCommand(args);
+                break;
+            case "setLayerTiming":
+                result = setLayerTiming(args);
+                break;
+            case "splitLayer":
+                result = splitLayer(args);
+                break;
+            case "setAnchorPoint":
+                result = setAnchorPoint(args);
+                break;
+            case "setLayerFlags":
+                result = setLayerFlags(args);
+                break;
+            case "renameLayer":
+                result = renameLayer(args);
+                break;
+            case "addMarker":
+                result = addMarker(args);
+                break;
+            case "getMarkers":
+                result = getMarkers(args);
+                break;
+            case "removeMarkers":
+                result = removeMarkers(args);
+                break;
+            case "listLayerProperties":
+                result = listLayerProperties(args);
+                break;
+            case "setProperty":
+                result = setProperty(args);
+                break;
+            case "addShapeContent":
+                result = addShapeContent(args);
+                break;
+            case "setTextDocument":
+                result = setTextDocument(args);
+                break;
+            case "getProjectTree":
+                result = getProjectTree(args);
+                break;
+            case "createFolder":
+                result = createFolder(args);
+                break;
+            case "moveProjectItems":
+                result = moveProjectItems(args);
+                break;
+            case "setProjectItemProperties":
+                result = setProjectItemProperties(args);
+                break;
+            case "openComp":
+                result = openComp(args);
+                break;
+            case "replaceLayerSource":
+                result = replaceLayerSource(args);
                 break;
             case "deleteProjectItems":
                 result = deleteProjectItems(args);
